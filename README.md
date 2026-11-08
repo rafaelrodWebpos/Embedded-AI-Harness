@@ -1,3 +1,9 @@
+> **Fork rafaelrodWebpos/Embedded-AI-Harness** of `SensorsIot/Embedded-AI-Harness`
+> at `db6a093`. Adds AP internet egress that never reaches the LAN
+> (`bench-ap-internet`) and an on-demand SNTP block (`bench-sntp-block`); nothing
+> else changes. Install, safety model and the one-command way back:
+> [docs/fork-villa.md](docs/fork-villa.md).
+
 # The Harness — AI Closed-Loop Programming for Embedded Systems
 
 [![host tests](https://img.shields.io/github/actions/workflow/status/SensorsIot/Embedded-AI-Harness/ci.yml?branch=main&label=host%20tests)](https://github.com/SensorsIot/Embedded-AI-Harness/actions/workflows/ci.yml)
