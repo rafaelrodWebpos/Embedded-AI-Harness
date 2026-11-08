@@ -141,6 +141,7 @@ cp "$SCRIPT_DIR/mqtt_controller.py"         /usr/local/bin/mqtt_controller.py
 cp "$SCRIPT_DIR/netscan_controller.py"      /usr/local/bin/netscan_controller.py
 cp "$SCRIPT_DIR/tls_mirror_controller.py"   /usr/local/bin/tls_mirror_controller.py
 cp "$SCRIPT_DIR/sniffer.py"                 /usr/local/bin/sniffer.py
+cp "$SCRIPT_DIR/ap_egress.py"               /usr/local/bin/ap_egress.py
 cp "$SCRIPT_DIR/rfc2217-learn-slots"        /usr/local/bin/rfc2217-learn-slots
 
 chmod +x /usr/local/bin/rfc2217-portal
@@ -161,6 +162,15 @@ chmod +x /usr/local/bin/wifi-lease-notify.sh
 # (off-USB, on-LAN) boards over the network.
 cp "$SCRIPT_DIR/scripts/espota.py" /usr/local/bin/espota.py
 chmod +x /usr/local/bin/espota.py
+# Fork: one-command way back to the bench as it was before the fork
+# (restores the snapshot in /var/backups/harness; see docs/fork-villa.md).
+mkdir -p /usr/local/sbin
+cp "$SCRIPT_DIR/scripts/harness-volver-original.sh" /usr/local/sbin/harness-volver-original
+chmod +x /usr/local/sbin/harness-volver-original
+# Build marker reported by GET /api/info ("build").
+mkdir -p /usr/local/share/harness
+git -c safe.directory="*" -C "$SCRIPT_DIR/.." rev-parse --short HEAD > /usr/local/share/harness/build 2>/dev/null \
+    || echo unknown > /usr/local/share/harness/build
 
 # ---------------------------------------------------------------------------
 # 6. Install config files (don't overwrite existing)

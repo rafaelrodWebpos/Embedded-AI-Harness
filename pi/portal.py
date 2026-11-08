@@ -31,6 +31,7 @@ import gpiod
 import mqtt_controller
 import netscan_controller
 import tls_mirror_controller
+import ap_egress
 import wifi_controller
 try:
     import ble_controller
@@ -56,6 +57,22 @@ def _config_path() -> str:
         print(f"[config] using {old}; rename it to {new}", flush=True)
         return old
     return new
+
+
+# Fork build marker, written by install.sh (git sha of the fork it installed).
+BUILD_FILE = "/usr/local/share/harness/build"
+# Capabilities this portal adds and reports by GET /api/info. bench-ap-internet
+# and bench-sntp-block are claimed only after the egress chains were installed
+# at start-up (egress_reset succeeded).
+_egress_ready = False
+
+
+def _read_build():
+    try:
+        with open(BUILD_FILE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
 
 
 CONFIG_FILE = _config_path()
@@ -2775,6 +2792,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"ok": True, **_sdr.get_log()})
         elif path == "/api/mqtt/status":
             self._send_json({"ok": True, **mqtt_controller.status()})
+        elif path == "/api/wifi/internet":
+            self._handle_wifi_internet_get()
         elif path == "/api/tls-mirror/status":
             self._send_json({"ok": True, **tls_mirror_controller.status()})
         elif path == "/api/udplog":
@@ -2841,6 +2860,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_wifi_ap_start()
         elif path == "/api/wifi/ap_stop":
             self._handle_wifi_ap_stop()
+        elif path == "/api/wifi/internet":
+            self._handle_wifi_internet_post()
+        elif path == "/api/wifi/sntp_block":
+            self._handle_wifi_sntp_block_post()
         elif path == "/api/wifi/sta_join":
             self._handle_wifi_sta_join()
         elif path == "/api/wifi/sta_leave":
@@ -2972,6 +2995,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "hostname": hostname,
             "slots_configured": sum(1 for s in slots.values() if s["tcp_port"] is not None),
             "slots_running": sum(1 for s in slots.values() if s["running"]),
+            "build": _read_build(),
+            "capabilities": (["bench-ap-internet", "bench-sntp-block"]
+                             if _egress_ready else []),
         })
 
     def _handle_hotplug(self):
@@ -3342,6 +3368,40 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _handle_wifi_ap_status(self):
         self._send_json({"ok": True, **wifi_controller.ap_status()})
+
+    # -- AP egress (bench-ap-internet, bench-sntp-block) --
+
+    def _handle_wifi_internet_get(self):
+        try:
+            self._send_json({"ok": True, **wifi_controller.egress_status()})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_wifi_internet_post(self):
+        try:
+            enabled = ap_egress.parse_flag(self._read_json(), "enabled")
+        except ValueError as e:
+            self._send_json({"ok": False, "error": str(e)}, 400)
+            return
+        try:
+            result = wifi_controller.egress_set_internet(enabled)
+            log_activity(f"AP internet egress {'on' if enabled else 'off'}", "wifi")
+            self._send_json({"ok": True, **result})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_wifi_sntp_block_post(self):
+        try:
+            blocked = ap_egress.parse_flag(self._read_json(), "blocked")
+        except ValueError as e:
+            self._send_json({"ok": False, "error": str(e)}, 400)
+            return
+        try:
+            result = wifi_controller.egress_set_sntp_block(blocked)
+            log_activity(f"AP SNTP (UDP/123) {'blocked' if blocked else 'unblocked'}", "wifi")
+            self._send_json({"ok": True, **result})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
 
     def _handle_wifi_sta_join(self):
         body = self._read_json()
@@ -6025,7 +6085,7 @@ async function sdrPoll() {
 # ---------------------------------------------------------------------------
 
 def main():
-    global slots, host_ip, hostname
+    global slots, host_ip, hostname, _egress_ready
 
     slots = load_config(CONFIG_FILE)
 
@@ -6062,6 +6122,14 @@ def main():
 
     # Ensure firmware directory exists
     os.makedirs(FIRMWARE_DIR, exist_ok=True)
+
+    # AP egress starts OFF on every start-up (bench-ap-internet). If the chains
+    # cannot be installed the capability is not reported.
+    try:
+        wifi_controller.egress_reset()
+        _egress_ready = True
+    except Exception as e:
+        print(f"[portal] AP egress unavailable: {e}", flush=True)
 
     addr = ("", PORT)
     http.server.ThreadingHTTPServer.allow_reuse_address = True

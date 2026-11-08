@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from queue import Empty, Queue
 
+import ap_egress
 import sniffer
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,14 @@ HOSTAPD_LOG = os.path.join(WORK_DIR, "hostapd.log")
 DNSMASQ_LOG = os.path.join(WORK_DIR, "dnsmasq.log")
 WPA_CONF = os.path.join(WORK_DIR, "wpa_supplicant.conf")
 WPA_LOG = os.path.join(WORK_DIR, "wpa_supplicant.log")
+# Upstream DNS for AP clients (dnsmasq servers-file, managed by ap_egress).
+DNS_SERVERS_FILE = os.path.join(WORK_DIR, "dns-servers")
+# The Pi's uplink. AP egress leaves only through it, and only to public addresses.
+UPLINK_IF = os.environ.get("WIFI_UPLINK_IF", "eth0")
+
+# AP egress (bench-ap-internet, bench-sntp-block). Off by default: the portal
+# calls egress_reset() at start-up and every ap_stop switches it off again.
+EGRESS = ap_egress.Egress(WLAN_IF, UPLINK_IF, AP_SUBNET, DNS_SERVERS_FILE)
 
 VERSION = "1.0.0-pi"
 
@@ -262,37 +271,14 @@ def _flush_addr(iface: str = None):
         pass
 
 
-def _enable_nat():
-    """Bridge the wlan0 AP to the LAN/internet via NAT masquerade on eth0.
-
-    Lets AP clients (e.g. a provisioned DUT on 192.168.4.x) reach the Pi's
-    own LAN (192.168.0.x) and the internet. Rules are added idempotently.
-    """
-    subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"],
-                   capture_output=True, check=False)
-    # (table, chain, rule-args) — added only if not already present (-C).
-    rules = [
-        ("nat", "POSTROUTING", ["-o", "eth0", "-j", "MASQUERADE"]),
-        ("filter", "FORWARD", ["-i", WLAN_IF, "-o", "eth0", "-j", "ACCEPT"]),
-        ("filter", "FORWARD", ["-i", "eth0", "-o", WLAN_IF, "-m", "state",
-                               "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]),
-    ]
-    for table, chain, args in rules:
-        base = ["iptables", "-t", table]
-        exists = subprocess.run(base + ["-C", chain] + args,
-                                capture_output=True, check=False).returncode == 0
-        if not exists:
-            subprocess.run(base + ["-A", chain] + args,
-                           capture_output=True, check=False)
-
-
 def ap_start(ssid, password="", channel=6, dns_logging=False, internet=False):
     """Start SoftAP on wlan0. Returns dict with ip.
 
     If dns_logging=True, dnsmasq is configured with DNS forwarding
     (8.8.8.8/8.8.4.4) and query logging for the sniffer.
-    If internet=True, DNS forwarding is enabled and wlan0 is NAT-bridged to
-    eth0 so AP clients reach the LAN/internet.
+    If internet=True, AP egress is switched on (ap_egress): clients reach the
+    internet through the uplink, never the LAN. Same as ap_start followed by
+    egress_set_internet(True).
     """
     global _ap_active, _ap_ssid, _ap_password, _ap_channel
     global _ap_hostapd_proc, _ap_dnsmasq_proc
@@ -357,7 +343,11 @@ def ap_start(ssid, password="", channel=6, dns_logging=False, internet=False):
             "no-daemon",
             "log-dhcp",
         ]
-        if dns_logging or internet:
+        # Upstream servers come from the egress-managed servers-file: public
+        # resolvers while egress is on, none while off. dns_logging keeps the
+        # sniffer's own forwarding as before.
+        dnsmasq_lines.append(f"servers-file={DNS_SERVERS_FILE}")
+        if dns_logging:
             dnsmasq_lines += ["server=8.8.8.8", "server=8.8.4.4"]
         if dns_logging:
             dnsmasq_lines += ["log-queries", f"log-facility={dns_log}"]
@@ -437,8 +427,9 @@ def ap_start(ssid, password="", channel=6, dns_logging=False, internet=False):
             _kill_proc(_ap_hostapd_proc)
             raise RuntimeError(f"dnsmasq failed to start: {_tail(DNSMASQ_LOG)}")
 
+        EGRESS.attach_dnsmasq(_ap_dnsmasq_proc.pid)
         if internet:
-            _enable_nat()
+            EGRESS.set_internet(True)
 
         _ap_active = True
         _start_hostapd_watcher()
@@ -474,6 +465,12 @@ def _ap_stop_unlocked():
     _stations.clear()
 
     _flush_addr()
+    # Egress back to its default (off, SNTP unblocked) on every stop.
+    EGRESS.attach_dnsmasq(None)
+    try:
+        EGRESS.reset()
+    except Exception as e:      # reported by egress_status() as rules_ok=false
+        logger.error("AP egress reset failed: %s", e)
     logger.info("AP stopped")
 
 
@@ -485,7 +482,34 @@ def ap_status():
             "ssid": _ap_ssid if _ap_active else "",
             "channel": _ap_channel if _ap_active else 0,
             "stations": list(_stations.values()) if _ap_active else [],
+            "internet": EGRESS.internet,
+            "sntp_blocked": EGRESS.sntp_blocked,
         }
+
+
+# ---------------------------------------------------------------------------
+# AP egress (bench-ap-internet, bench-sntp-block)
+# ---------------------------------------------------------------------------
+
+def egress_reset():
+    """Default state: internet off, SNTP unblocked. Called at portal start-up."""
+    _ensure_work_dir()
+    EGRESS.reset()
+
+
+def egress_set_internet(enabled: bool) -> dict:
+    _ensure_work_dir()
+    EGRESS.set_internet(enabled)
+    return EGRESS.status()
+
+
+def egress_set_sntp_block(blocked: bool) -> dict:
+    EGRESS.set_sntp_block(blocked)
+    return EGRESS.status()
+
+
+def egress_status() -> dict:
+    return EGRESS.status()
 
 
 # ---------------------------------------------------------------------------
@@ -1004,20 +1028,9 @@ def sniffer_start(ssid, password="", channel=6):
 
     _check_wifi_testing_mode()
 
-    # Start AP with DNS logging enabled
-    ap_start(ssid, password, channel, dns_logging=True)
-
-    # Enable IP forwarding
-    _run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=False)
-
-    # Add NAT masquerade on eth0
-    _run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", "eth0",
-          "-j", "MASQUERADE"], check=False)
-    _run(["iptables", "-A", "FORWARD", "-i", WLAN_IF, "-o", "eth0",
-          "-j", "ACCEPT"], check=False)
-    _run(["iptables", "-A", "FORWARD", "-i", "eth0", "-o", WLAN_IF,
-          "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
-         check=False)
+    # Start AP with DNS logging and internet egress (public addresses only,
+    # through ap_egress; never the LAN)
+    ap_start(ssid, password, channel, dns_logging=True, internet=True)
 
     # Start sniffer capture threads
     dns_log = os.path.join(WORK_DIR, "dns.log")
@@ -1036,18 +1049,7 @@ def sniffer_stop():
     # Stop sniffer threads
     sniffer.stop()
 
-    # Remove NAT rules
-    _run(["iptables", "-t", "nat", "-D", "POSTROUTING", "-o", "eth0",
-          "-j", "MASQUERADE"], check=False)
-    _run(["iptables", "-D", "FORWARD", "-i", WLAN_IF, "-o", "eth0",
-          "-j", "ACCEPT"], check=False)
-    _run(["iptables", "-D", "FORWARD", "-i", "eth0", "-o", WLAN_IF,
-          "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
-         check=False)
-
-    # Disable IP forwarding
-    _run(["sysctl", "-w", "net.ipv4.ip_forward=0"], check=False)
-
+    # NAT and forwarding go with the AP: ap_stop resets AP egress.
     # Stop AP
     ap_stop()
 

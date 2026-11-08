@@ -3966,7 +3966,7 @@ errors add `"error": "..."`.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/devices` | List all slots with status, RFC2217 URL, detected chip, debug port, USB device info |
-| GET | `/api/info` | Pi IP, hostname, total slot count, portal uptime |
+| GET | `/api/info` | Pi IP, hostname, total slot count, portal uptime; in the fork also `build` (installed git sha) and `capabilities` (`bench-ap-internet`, `bench-sntp-block` once the egress chains are installed) |
 
 `state` is one of `absent`, `idle`, `monitoring`, `resetting`, `debugging`, `recovering`, `download_mode`.
 
@@ -4021,9 +4021,12 @@ AP and STA modes are mutually exclusive.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET · POST | `/api/wifi/mode` | Get / switch mode `{"mode"}` |
-| POST | `/api/wifi/ap_start` | Start SoftAP `{"ssid", "password?", "channel?", "internet?"}` → `{"ok", "ip"}` |
+| POST | `/api/wifi/ap_start` | Start SoftAP `{"ssid", "password?", "channel?", "internet?"}` → `{"ok", "ip"}`. In the fork, `internet: true` is `POST /api/wifi/internet {"enabled": true}` after the start (no LAN access) |
 | POST | `/api/wifi/ap_stop` | Stop SoftAP |
-| GET | `/api/wifi/ap_status` | `{"active", "ssid", "channel", "stations": [{"mac", "ip"}, ...]}` |
+| GET | `/api/wifi/ap_status` | `{"active", "ssid", "channel", "stations": [{"mac", "ip"}, ...], "internet", "sntp_blocked"}` |
+| GET | `/api/wifi/internet` | AP egress state `{"internet", "sntp_blocked", "lan_blocked": true, "rules_ok", "rules": [...]}` — `rules` is the live `iptables -S HARNESS_AP_FWD`, `rules_ok` compares it with the expected set (fork rafaelrodWebpos) |
+| POST | `/api/wifi/internet` | `{"enabled": true\|false}` — internet egress for AP clients: public addresses only, LAN and every private range blocked; off at start-up and after every `ap_stop`. Same response as the GET |
+| POST | `/api/wifi/sntp_block` | `{"blocked": true\|false}` — drop UDP/123 from the AP network (an SNTP attempt then times out). Same response as the GET |
 | POST | `/api/wifi/sta_join` · `sta_leave` | Join / leave a network `{"ssid", "pass?"}` |
 | GET | `/api/wifi/scan` | Scan nearby WiFi networks |
 | POST | `/api/wifi/http` | HTTP relay through wlan0 `{"method", "url", "headers?", "body?"}` |

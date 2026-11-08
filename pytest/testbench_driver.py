@@ -223,6 +223,25 @@ class TestbenchDriver:
         result = self._api_get("/api/wifi/ap_status", timeout=30)
         return {k: v for k, v in result.items() if k != "ok"}
 
+    # ── AP egress: bench-ap-internet, bench-sntp-block ───────────────
+
+    def ap_internet(self, enabled: bool) -> dict:
+        """Switch the AP clients' internet egress on or off. Public addresses
+        only: the LAN and every private range stay blocked. Off by default and
+        again after every ap_stop."""
+        result = self._api_post("/api/wifi/internet", {"enabled": bool(enabled)}, timeout=15)
+        return {k: v for k, v in result.items() if k != "ok"}
+
+    def sntp_block(self, blocked: bool) -> dict:
+        """Drop (or stop dropping) UDP/123 from the AP network."""
+        result = self._api_post("/api/wifi/sntp_block", {"blocked": bool(blocked)}, timeout=15)
+        return {k: v for k, v in result.items() if k != "ok"}
+
+    def internet_status(self) -> dict:
+        """{internet, sntp_blocked, lan_blocked, rules_ok, rules}."""
+        result = self._api_get("/api/wifi/internet", timeout=15)
+        return {k: v for k, v in result.items() if k != "ok"}
+
     def wifi_http(self, url: str, method: str = "GET",
                   headers: Optional[dict] = None, body: str = None,
                   timeout: int = 8) -> dict:

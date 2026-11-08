@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Pre-push local del fork (repositorio público). Bloquea el push si los commits que
+# se van a subir contienen:
+#   1. un secreto según gitleaks (versión y sha256 fijados, como en la CI), o
+#   2. un valor del archivo de entorno local del propietario, el host de una URL de
+#      ese archivo o el prefijo /24 de una IPv4 suya (la red de la casa), o
+#   3. cualquier MAC: el fork no lleva ninguna.
+# El archivo de entorno se indica con `git config harness.envfile <ruta>` (configuración
+# local del clon, nunca versionada). Sin él, el push se bloquea (falla cerrado).
+# Activación (una vez por clon):  git config core.hooksPath tools/git-hooks
+set -euo pipefail
+
+GITLEAKS_VERSION=8.30.1
+GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+ROOT=$(git rev-parse --show-toplevel)
+CACHE="$(git rev-parse --git-common-dir)/tools"
+GL="$CACHE/gitleaks-$GITLEAKS_VERSION"
+ZERO=0000000000000000000000000000000000000000
+
+fail() { echo "pre-push: BLOQUEADO — $*" >&2; exit 1; }
+
+ENVFILE=$(git config --get harness.envfile || true)
+[ -n "$ENVFILE" ] && [ -f "$ENVFILE" ] || fail "sin harness.envfile (git config harness.envfile <ruta>): no se puede revisar"
+
+if [ ! -x "$GL" ]; then
+  mkdir -p "$CACHE"; tmp=$(mktemp -d)
+  curl -sSfL --retry 3 --retry-all-errors --retry-delay 10 -o "$tmp/gl.tgz" \
+    "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+    || fail "no se pudo descargar gitleaks (sin red no se puede revisar: no se sube)"
+  echo "${GITLEAKS_SHA256}  $tmp/gl.tgz" | sha256sum -c - >/dev/null || fail "sha256 de gitleaks no coincide"
+  tar xzf "$tmp/gl.tgz" -C "$tmp" gitleaks && mv "$tmp/gitleaks" "$GL" && rm -rf "$tmp"
+fi
+
+# Patrones: cada valor (≥ 4 caracteres), el host de cada URL y el prefijo /24 de cada IPv4.
+patterns=$(mktemp); trap 'rm -f "$patterns"' EXIT
+sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?[A-Za-z_][A-Za-z0-9_]*=//p' "$ENVFILE" \
+  | sed -e 's/^["'\'']//' -e 's/["'\'']$//' | while IFS= read -r v; do
+      [ ${#v} -ge 4 ] && printf '%s\n' "$v"
+      h=$(printf '%s' "$v" | sed -n 's#^[a-z][a-z0-9+.-]*://\([^/:@]*\).*#\1#p')
+      [ -n "$h" ] && [ ${#h} -ge 4 ] && printf '%s\n' "$h"
+      printf '%s\n' "$v" | grep -oE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' | sed -E 's/\.[0-9]+$/./' || true
+    done | sort -u > "$patterns"
+[ -s "$patterns" ] || fail "el archivo de entorno no da ningún patrón"
+
+checked=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$ZERO" ] && continue
+  if [ "$remote_sha" = "$ZERO" ]; then range="$local_sha --not --remotes"
+  else range="$remote_sha..$local_sha"; fi
+  n=$(git rev-list --count $range)
+  [ "$n" -eq 0 ] && continue
+  checked=$((checked + n))
+  "$GL" git --redact --no-banner --exit-code 1 --log-opts="$range" "$ROOT" >/dev/null 2>&1 \
+    || fail "gitleaks encuentra un secreto en $range"
+  # Contar, no `grep -q`: con pipefail, -q cierra la tubería al primer hallazgo,
+  # git log muere por SIGPIPE y el `if` leería «sin hallazgo» en un diff grande.
+  hits=$(set +o pipefail; git log -p --format='%B%n%an %ae' $range | grep -F -c -f "$patterns" || true)
+  [ "$hits" -eq 0 ] || fail "un dato del entorno local (o la red de la casa) aparece en los commits que se suben ($range)"
+  macs=$(set +o pipefail; git log -p --format= $range | grep '^+' | grep -ciE '\b([0-9a-f]{2}[:-]){5}[0-9a-f]{2}\b' || true)
+  [ "$macs" -eq 0 ] || fail "$macs línea(s) añadida(s) con una MAC ($range)"
+done
+echo "pre-push: $checked commit(s) revisados — gitleaks, $(wc -l < "$patterns") patrón(es) locales y MACs sin hallazgos" >&2
