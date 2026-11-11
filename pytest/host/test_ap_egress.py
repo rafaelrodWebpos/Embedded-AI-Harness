@@ -101,7 +101,11 @@ def test_restore_script_flushes_only_its_own_chains():
     assert s.count("COMMIT") == 2
     for line in s.splitlines():
         assert line in ("*filter", "*nat", "COMMIT") or line.startswith(":HARNESS_AP_") \
-            or line.startswith(f"-A {eg.CHAIN_FWD} ") or line.startswith(f"-A {eg.CHAIN_NAT} ")
+            or line.startswith(f"-A {eg.CHAIN_FWD} ") or line.startswith(f"-A {eg.CHAIN_NAT} ") \
+            or line.startswith(f"-A {eg.CHAIN_IN} ")
+    # S6-04: the INPUT chain drops the AP subnet from the uplink, internet on or off
+    for internet in (False, True):
+        assert f"-A {eg.CHAIN_IN} -d {SUB} -j DROP" in eg.restore_script(internet, False, WLAN, UP, SUB).splitlines()
     assert eg.restore6_script() == f"*filter\n:{eg.CHAIN_FWD6} - [0:0]\n-A {eg.CHAIN_FWD6} -j DROP\nCOMMIT\n"
 
 
@@ -224,9 +228,11 @@ def test_status_compares_the_listing_with_the_expected_rules():
     good = "\n".join(eg.expected_listing(True, False, WLAN, UP, SUB))
     orig = h.run
 
+    good_in = "\n".join([f"-N {eg.CHAIN_IN}", f"-A {eg.CHAIN_IN} -d {SUB} -j DROP"])
+
     def run(cmd, stdin=None):
         if cmd[:3] == ["iptables", "-w", "-S"]:
-            return 0, good, ""
+            return 0, (good_in if cmd[3] == eg.CHAIN_IN else good), ""
         return orig(cmd, stdin)
     e._run = run
     st = e.status()
@@ -265,3 +271,13 @@ def test_a_failing_sysctl_leaves_egress_closed():
         e.set_internet(True)
     assert e.internet is False
     assert h.stdin[-2] == ("iptables-restore", eg.restore_script(False, False, WLAN, UP, SUB))
+
+
+def test_s6_04_input_hook_on_the_uplink_at_position_1():
+    hooks = eg.hook_rules(WLAN, UP)
+    assert ("iptables", "filter", "INPUT", ["-i", UP, "-j", eg.CHAIN_IN]) in hooks
+    h = FakeHost()
+    make(h).reset()
+    ins = [c for c in h.cmds if "-I" in c and "INPUT" in c]
+    assert ins and ins[0][ins[0].index("-I") + 2] == "1" and ins[0][-1] == eg.CHAIN_IN
+    assert eg.in_rules(SUB) == [["-d", SUB, "-j", "DROP"]]

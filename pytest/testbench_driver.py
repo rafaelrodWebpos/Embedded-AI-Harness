@@ -92,8 +92,18 @@ class TestbenchDriver:
 
     __test__ = False        # not a test class — see TestbenchError above
 
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, token: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
+        # Fork villa-2 (S6-01): every /api/* call except GET /api/info needs the
+        # bench token; it comes from the argument or TESTBENCH_TOKEN (.env).
+        self.token = token if token is not None else os.environ.get("TESTBENCH_TOKEN", "")
+
+    def _request(self, url, data=None, headers=None, method=None):
+        """urllib Request with the bench token header added."""
+        h = dict(headers or {})
+        if self.token:
+            h["X-Harness-Token"] = self.token
+        return urllib.request.Request(url, data=data, headers=h, method=method)
 
     # ── Lifecycle ────────────────────────────────────────────────────
 
@@ -115,7 +125,7 @@ class TestbenchDriver:
     def _api_get(self, path: str, timeout: float = 10) -> dict:
         """GET an API endpoint, return parsed JSON."""
         url = f"{self.base_url}{path}"
-        req = urllib.request.Request(url)
+        req = self._request(url)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read())
@@ -148,7 +158,7 @@ class TestbenchDriver:
         """
         url = f"{self.base_url}{path}"
         data_bytes = json.dumps(body or {}).encode("utf-8")
-        req = urllib.request.Request(
+        req = self._request(
             url, data=data_bytes,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -169,7 +179,7 @@ class TestbenchDriver:
         """POST JSON to an API endpoint, return parsed JSON."""
         url = f"{self.base_url}{path}"
         data_bytes = json.dumps(body or {}).encode("utf-8")
-        req = urllib.request.Request(
+        req = self._request(
             url, data=data_bytes,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -459,7 +469,7 @@ class TestbenchDriver:
     def get_devices(self) -> list[dict]:
         """GET /api/devices — returns list of slot dicts."""
         url = f"{self.base_url}/api/devices"
-        req = urllib.request.Request(url)
+        req = self._request(url)
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read())
@@ -838,7 +848,7 @@ class TestbenchDriver:
             params.append(f"limit={limit}")
         qs = "?" + "&".join(params) if params else ""
         url = f"{self.base_url}/api/udplog{qs}"
-        req = urllib.request.Request(url)
+        req = self._request(url)
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read())
@@ -849,7 +859,7 @@ class TestbenchDriver:
     def udplog_clear(self) -> None:
         """DELETE /api/udplog — clear the log buffer."""
         url = f"{self.base_url}/api/udplog"
-        req = urllib.request.Request(url, method="DELETE")
+        req = self._request(url, method="DELETE")
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 json.loads(resp.read())
@@ -879,7 +889,7 @@ class TestbenchDriver:
         ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
 
         url = f"{self.base_url}/api/firmware/upload"
-        req = urllib.request.Request(
+        req = self._request(
             url, data=body,
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",
@@ -895,7 +905,7 @@ class TestbenchDriver:
         """DELETE /api/firmware/delete — delete a firmware file."""
         url = f"{self.base_url}/api/firmware/delete"
         data_bytes = json.dumps({"project": project, "filename": filename}).encode()
-        req = urllib.request.Request(
+        req = self._request(
             url, data=data_bytes,
             headers={"Content-Type": "application/json"},
             method="DELETE",
@@ -980,7 +990,7 @@ class TestbenchDriver:
         """GET /api/slot/mode — {ok, mode, owner, since, expires_in}."""
         url = f"{self.base_url}/api/slot/mode?slot={slot}"
         try:
-            with urllib.request.urlopen(urllib.request.Request(url), timeout=10) as resp:
+            with urllib.request.urlopen(self._request(url), timeout=10) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
             try:
@@ -1056,7 +1066,7 @@ class TestbenchDriver:
         parts.append(f"--{boundary}--\r\n".encode())
         body = b"".join(parts)
 
-        req = urllib.request.Request(
+        req = self._request(
             f"{self.base_url}/api/flash", data=body,
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST")

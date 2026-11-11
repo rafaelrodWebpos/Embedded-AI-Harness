@@ -16,6 +16,7 @@ set -euo pipefail
 
 SNAP=/var/backups/harness
 WLAN_IF="${WIFI_WLAN_IF:-wlan0}"
+UPLINK_IF="${WIFI_UPLINK_IF:-eth0}"
 [ "$(id -u)" -eq 0 ] || { echo "ejecútalo con sudo"; exit 1; }
 [ -f "$SNAP/archivos-antes.tgz" ] && [ -f "$SNAP/ip_forward-antes" ] \
     || { echo "no hay instantánea en $SNAP: no se toca nada"; exit 1; }
@@ -31,12 +32,13 @@ quitar_salto() {   # binario tabla cadena args...: borra todas las copias del sa
         "$bin" -w -t "$tabla" -D "$cadena" "$@"
     done
 }
+quitar_salto iptables  filter INPUT       -i "$UPLINK_IF" -j HARNESS_AP_IN   # villa-2, S6-04
 quitar_salto iptables  filter FORWARD     -i "$WLAN_IF" -j HARNESS_AP_FWD
 quitar_salto iptables  filter FORWARD     -o "$WLAN_IF" -j HARNESS_AP_FWD
 quitar_salto iptables  nat    POSTROUTING -j HARNESS_AP_NAT
 quitar_salto ip6tables filter FORWARD     -i "$WLAN_IF" -j HARNESS_AP_FWD6
 quitar_salto ip6tables filter FORWARD     -o "$WLAN_IF" -j HARNESS_AP_FWD6
-for c in "iptables filter HARNESS_AP_FWD" "iptables nat HARNESS_AP_NAT" "ip6tables filter HARNESS_AP_FWD6"; do
+for c in "iptables filter HARNESS_AP_FWD" "iptables filter HARNESS_AP_IN" "iptables nat HARNESS_AP_NAT" "ip6tables filter HARNESS_AP_FWD6"; do
     set -- $c
     "$1" -w -t "$2" -F "$3" 2>/dev/null || true
     "$1" -w -t "$2" -X "$3" 2>/dev/null || true
@@ -48,8 +50,10 @@ sysctl -w "net.ipv4.ip_forward=$(cat "$SNAP/ip_forward-antes")"
 echo "4/5 restaurar los archivos del banco original"
 tar xzf "$SNAP/archivos-antes.tgz" -C /
 rm -f /usr/local/bin/ap_egress.py /usr/local/bin/dns_override.py /usr/local/bin/capture_controller.py \
-      /usr/local/share/harness/build /tmp/mqtt-tester/passwd /tmp/wifi-tester/dns-override-hosts
-rm -rf /var/lib/rfc2217/dns-override-tls
+      /usr/local/bin/api_auth.py /usr/local/bin/run_dir.py \
+      /usr/local/share/harness/build /tmp/mqtt-tester/passwd /tmp/wifi-tester/dns-override-hosts \
+      /etc/rfc2217/api-token
+rm -rf /var/lib/rfc2217/dns-override-tls /run/harness
 systemctl daemon-reload
 udevadm control --reload-rules || true
 systemctl restart rfc2217-portal
@@ -60,7 +64,11 @@ quedan=$( { iptables-save; ip6tables-save; } | grep -c HARNESS || true)
 info=$(curl -s -m 5 http://127.0.0.1:8080/api/info || true)
 echo "reglas HARNESS que quedan: $quedan"
 echo "/api/info: $info"
-if [ "$quedan" -ne 0 ] || [ -z "$info" ] || echo "$info" | grep -qE 'bench-ap-internet|bench-dns-override|bench-traffic-capture|bench-mqtt-auth'; then
+restos=""
+[ -e /etc/rfc2217/api-token ] && restos="$restos /etc/rfc2217/api-token"
+[ -e /run/harness ] && restos="$restos /run/harness"
+echo "ficheros del fork que quedan:${restos:- ninguno}"
+if [ "$quedan" -ne 0 ] || [ -n "$restos" ] || [ -z "$info" ] || echo "$info" | grep -qE 'bench-ap-internet|bench-dns-override|bench-traffic-capture|bench-mqtt-auth'; then
     echo "VUELTA ATRÁS INCOMPLETA: revisar a mano"; exit 1
 fi
 echo "Banco original restaurado. (Este comando se queda en /usr/local/sbin; se puede borrar.)"

@@ -144,6 +144,8 @@ cp "$SCRIPT_DIR/sniffer.py"                 /usr/local/bin/sniffer.py
 cp "$SCRIPT_DIR/ap_egress.py"               /usr/local/bin/ap_egress.py
 cp "$SCRIPT_DIR/dns_override.py"            /usr/local/bin/dns_override.py
 cp "$SCRIPT_DIR/capture_controller.py"      /usr/local/bin/capture_controller.py
+cp "$SCRIPT_DIR/api_auth.py"                /usr/local/bin/api_auth.py
+cp "$SCRIPT_DIR/run_dir.py"                 /usr/local/bin/run_dir.py
 cp "$SCRIPT_DIR/rfc2217-learn-slots"        /usr/local/bin/rfc2217-learn-slots
 
 chmod +x /usr/local/bin/rfc2217-portal
@@ -169,6 +171,14 @@ chmod +x /usr/local/bin/espota.py
 mkdir -p /usr/local/sbin
 cp "$SCRIPT_DIR/scripts/harness-volver-original.sh" /usr/local/sbin/harness-volver-original
 chmod +x /usr/local/sbin/harness-volver-original
+# Fork villa-2 (S6-01): the portal API token. Generated once, kept across updates;
+# root-only. The owner copies it to the laptop .env (TESTBENCH_TOKEN); never in git.
+mkdir -p /etc/rfc2217
+if [ ! -s /etc/rfc2217/api-token ]; then
+    ( umask 077; head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 48 > /etc/rfc2217/api-token )
+fi
+chown root:root /etc/rfc2217/api-token
+chmod 600 /etc/rfc2217/api-token
 # Build marker reported by GET /api/info ("build").
 mkdir -p /usr/local/share/harness
 git -c safe.directory="*" -C "$SCRIPT_DIR/.." rev-parse --short HEAD > /usr/local/share/harness/build 2>/dev/null \

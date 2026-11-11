@@ -32,6 +32,7 @@ import mqtt_controller
 import netscan_controller
 import tls_mirror_controller
 import ap_egress
+import api_auth
 import capture_controller
 import dns_override
 import wifi_controller
@@ -71,7 +72,11 @@ _egress_ready = False
 # bench-mqtt-auth (needs mosquitto_passwd), bench-traffic-capture (needs
 # tcpdump), bench-serial-write (POST /api/serial/write, FR-030, already here).
 _dns_override_ready = False
-CAPTURE = capture_controller.Capture(os.environ.get("WIFI_WLAN_IF", "wlan0"))
+# S6-01: API token, loaded at start-up (None = every protected route refused).
+API_TOKEN = None
+CAPTURE = capture_controller.Capture(os.environ.get("WIFI_WLAN_IF", "wlan0"),
+                                     ap_active=lambda: bool(wifi_controller.ap_status().get("active")))
+wifi_controller.AP_STOP_HOOKS.append(CAPTURE.stop)        # S6-05: every AP stop stops it
 
 
 def _capabilities():
@@ -2738,7 +2743,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Content-Length", len(body))
             self.end_headers()
             self.wfile.write(body)
@@ -2753,14 +2757,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     # -- routes --
 
+    def _authorized(self):
+        """S6-01: every /api/* route except GET /api/info needs X-Harness-Token."""
+        path = urlparse(self.path).path
+        if api_auth.allowed(self.command, path, self.headers.get(api_auth.HEADER), API_TOKEN):
+            return True
+        self._send_json({"ok": False, "error": "token required (X-Harness-Token)"}, 401)
+        return False
+
     def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # S6-01: no CORS. The UI is same-origin and needs no preflight.
+        self.send_response(204)
         self.end_headers()
 
     def do_GET(self):
+        if not self._authorized():
+            return
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -2841,6 +2853,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._authorized():
+            return
         path = urlparse(self.path).path
 
         if path == "/api/hotplug":
@@ -2963,6 +2977,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             try:
                 self._send_json({"ok": True, **mqtt_controller.start(user, pw)})
+            except mqtt_controller.ConflictError as exc:          # S6-07
+                self._send_json({"ok": False, "error": str(exc)}, 409)
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, 500)
         elif path == "/api/mqtt/stop":
@@ -2999,6 +3015,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, 404)
 
     def do_DELETE(self):
+        if not self._authorized():
+            return
         path = urlparse(self.path).path
         if path == "/api/udplog":
             _udp_log.clear()
@@ -3026,7 +3044,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _handle_get_info(self):
         _refresh_host_ip()
-        self._send_json({
+        full = {
             "ok": True,
             "host_ip": host_ip,
             "hostname": hostname,
@@ -3034,7 +3052,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "slots_running": sum(1 for s in slots.values() if s["running"]),
             "build": _read_build(),
             "capabilities": _capabilities(),
-        })
+        }
+        # S6-01: without the token, only ok, build and capabilities (no address, name or slots)
+        if api_auth.allowed("POST", "/api/info", self.headers.get(api_auth.HEADER), API_TOKEN):
+            self._send_json(full)
+        else:
+            self._send_json(api_auth.public_info(full))
 
     def _handle_hotplug(self):
         global seq_counter
@@ -3397,8 +3420,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _handle_wifi_ap_stop(self):
         try:
-            wifi_controller.ap_stop()
-            CAPTURE.stop()              # bench-traffic-capture: nothing runs past ap_stop
+            wifi_controller.ap_stop()   # also stops a capture (AP_STOP_HOOKS, S6-05)
             self._send_json({"ok": True})
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)})
@@ -5469,6 +5491,26 @@ _UI_HTML = """\
         </div>
     </div>
 <script>
+// S6-01: every /api/* call except /api/info carries the bench token, typed once and kept
+// in this browser (localStorage). A 401 asks for it again.
+(function () {
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = function (url, opts) {
+        opts = opts || {};
+        if (typeof url === 'string' && url.startsWith('/api/') && url !== '/api/info') {
+            let t = '';
+            try { t = localStorage.getItem('harnessToken') || ''; } catch (e) { /* */ }
+            opts.headers = Object.assign({}, opts.headers || {}, {'X-Harness-Token': t});
+        }
+        return nativeFetch(url, opts).then(function (r) {
+            if (r.status === 401) {
+                const t = window.prompt('Token del banco (X-Harness-Token):');
+                if (t) { try { localStorage.setItem('harnessToken', t.trim()); } catch (e) { /* */ } }
+            }
+            return r;
+        });
+    };
+})();
 let hostName = '';
 let hostIp = '';
 async function fetchDevices() {
@@ -6151,7 +6193,7 @@ async function sdrPoll() {
 # ---------------------------------------------------------------------------
 
 def main():
-    global slots, host_ip, hostname, _egress_ready, _dns_override_ready
+    global slots, host_ip, hostname, _egress_ready, _dns_override_ready, API_TOKEN
 
     slots = load_config(CONFIG_FILE)
 
@@ -6196,6 +6238,10 @@ def main():
         _egress_ready = True
     except Exception as e:
         print(f"[portal] AP egress unavailable: {e}", flush=True)
+    # S6-01: the API token (install.sh writes it); without it the API stays closed.
+    API_TOKEN = api_auth.load_token()
+    if API_TOKEN is None:
+        print(f"[portal] no valid API token in {api_auth.TOKEN_FILE}: /api/* refused except GET /api/info", flush=True)
     # DNS override starts OFF too (bench-dns-override).
     try:
         wifi_controller.dns_override_reset()

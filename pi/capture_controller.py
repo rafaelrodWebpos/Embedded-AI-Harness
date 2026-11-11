@@ -45,7 +45,7 @@ def parse_request(body):
         raise ValueError("body must be a JSON object")
     mac = body.get("mac")
     secs = body.get("seconds")
-    if not isinstance(mac, str) or not _MAC_RE.match(mac.lower()):
+    if not isinstance(mac, str) or not _MAC_RE.fullmatch(mac.lower()):   # S6-08
         raise ValueError("mac must be six two-digit hex groups separated by colons")
     if isinstance(secs, bool) or not isinstance(secs, int) or not 1 <= secs <= MAX_SECONDS:
         raise ValueError(f"seconds must be an integer 1-{MAX_SECONDS}")
@@ -95,8 +95,11 @@ def summarize(lines):
 class Capture:
     """One capture at a time; `popen` is injectable for the host tier."""
 
-    def __init__(self, iface, popen=None, clock=time.time):
+    def __init__(self, iface, popen=None, clock=time.time, ap_active=None):
         self.iface = iface
+        # S6-05: a capture only runs while the bench AP is up (never on a network the
+        # Pi joined as a station); every AP stop stops it (wifi_controller hook).
+        self._ap_active = ap_active or (lambda: False)
         self._popen = popen or (lambda cmd: subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True))
         self._clock = clock
@@ -109,6 +112,8 @@ class Capture:
         return shutil.which("tcpdump") is not None
 
     def start(self, mac, seconds):
+        if not self._ap_active():
+            raise RuntimeError("the bench AP is not running: a capture needs it up")
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 raise RuntimeError("a capture is already running")
@@ -116,8 +121,9 @@ class Capture:
             self._proc = proc
             self._state = {"state": "running", "mac": mac, "seconds": seconds,
                            "started": self._clock()}
+            arrancada = dict(self._state)      # copied before the thread can finish
         threading.Thread(target=self._collect, args=(proc, mac, seconds), daemon=True).start()
-        return dict(self._state)
+        return arrancada
 
     def _collect(self, proc, mac, seconds):
         lines = []

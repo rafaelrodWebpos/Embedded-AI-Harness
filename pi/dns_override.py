@@ -25,11 +25,11 @@ import logging
 import os
 import re
 import signal
-import socket
 import ssl
 import subprocess
 import threading
 
+import run_dir
 import tls_mirror_controller as tls
 
 logger = logging.getLogger("dns_override")
@@ -59,7 +59,7 @@ def validate_host(host):
     if not isinstance(host, str):
         raise ValueError("host must be a string")
     h = host.strip().lower().rstrip(".")
-    if _IPV4_RE.match(h) or not _HOST_RE.match(h):
+    if _IPV4_RE.fullmatch(h) or not _HOST_RE.fullmatch(h):     # S6-08: fullmatch, no trailing \n
         raise ValueError("host must be a DNS name such as github.com")
     return h
 
@@ -87,6 +87,33 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         logger.info("https %s", fmt % args)
 
 
+HANDSHAKE_TIMEOUT_S = 5
+
+
+class _TLSServer(http.server.ThreadingHTTPServer):
+    """S6-09: the listening socket stays plain; each accepted connection does its TLS
+    handshake in its own worker thread with a timeout, so a client that opens TCP and
+    never sends a ClientHello cannot block accept() for everybody else."""
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def __init__(self, addr, handler, ctx):
+        self.ctx = ctx
+        super().__init__(addr, handler)
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        sock.settimeout(HANDSHAKE_TIMEOUT_S)
+        return sock, addr
+
+    def finish_request(self, request, client_address):
+        try:
+            tls_sock = self.ctx.wrap_socket(request, server_side=True)
+        except (ssl.SSLError, OSError):
+            return                                   # bad or slow client: dropped
+        self.RequestHandlerClass(tls_sock, client_address, self)
+
+
 class DnsOverride:
     """State and side effects; `write_file` and `make_server` are injectable."""
 
@@ -101,24 +128,19 @@ class DnsOverride:
 
     @staticmethod
     def _write_file(path, text):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(text)
-        os.replace(tmp, path)
+        # S6-03: under the root-owned /run/harness, O_NOFOLLOW; 0644 so dnsmasq,
+        # possibly without root by then, can re-read it on SIGHUP (not a secret).
+        run_dir.ensure_run_dirs()
+        run_dir.write_file(path, text, 0o644)
 
     def _https_server(self):
         os.makedirs(CERT_DIR, mode=0o700, exist_ok=True)
         cert, key = os.path.join(CERT_DIR, tls.CERT_FILE), os.path.join(CERT_DIR, tls.KEY_FILE)
         if tls.needs_new_cert(os.path.exists(cert), os.path.exists(key)):
             subprocess.run(tls.openssl_command(cert, key), check=True, capture_output=True, timeout=60)
-        srv = http.server.ThreadingHTTPServer((self.ap_ip, HTTPS_PORT), _Handler, bind_and_activate=False)
-        srv.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.server_bind()
-        srv.server_activate()
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert, key)
-        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        srv = _TLSServer((self.ap_ip, HTTPS_PORT), _Handler, ctx)
         threading.Thread(target=srv.serve_forever, name="dns-override-https", daemon=True).start()
         return srv
 

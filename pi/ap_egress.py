@@ -42,6 +42,11 @@ logger = logging.getLogger("ap_egress")
 CHAIN_FWD = "HARNESS_AP_FWD"
 CHAIN_NAT = "HARNESS_AP_NAT"
 CHAIN_FWD6 = "HARNESS_AP_FWD6"
+# Fork villa-2, review S6 finding S6-04: Linux accepts on eth0 a packet addressed to
+# 192.168.4.1 (weak host model) if a LAN machine routes the AP subnet through the
+# Pi. This INPUT chain, hooked for -i <uplink>, drops anything from the uplink
+# addressed to the AP subnet, always (internet on or off).
+CHAIN_IN = "HARNESS_AP_IN"
 
 # Destinations an AP client may never reach through the uplink (RFC 1918,
 # RFC 6598, RFC 3927, loopback, "this network", multicast and reserved).
@@ -90,9 +95,15 @@ def nat_rules(internet: bool, uplink: str, ap_subnet: str) -> list:
     return [["-s", ap_subnet, "-o", uplink, "-j", "MASQUERADE"]]
 
 
-def hook_rules(wlan: str) -> list:
+def in_rules(ap_subnet: str) -> list:
+    """Rules of HARNESS_AP_IN (S6-04): nothing from the uplink reaches the AP subnet."""
+    return [["-d", ap_subnet, "-j", "DROP"]]
+
+
+def hook_rules(wlan: str, uplink: str = "eth0") -> list:
     """Jumps into the dedicated chains: (binary, table, chain, args)."""
     return [
+        ("iptables", "filter", "INPUT", ["-i", uplink, "-j", CHAIN_IN]),
         ("iptables", "filter", "FORWARD", ["-i", wlan, "-j", CHAIN_FWD]),
         ("iptables", "filter", "FORWARD", ["-o", wlan, "-j", CHAIN_FWD]),
         ("iptables", "nat", "POSTROUTING", ["-j", CHAIN_NAT]),
@@ -108,6 +119,8 @@ def restore_script(internet: bool, sntp_blocked: bool, wlan: str, uplink: str,
     out = ["*filter", f":{CHAIN_FWD} - [0:0]"]
     out += [" ".join(["-A", CHAIN_FWD] + r)
             for r in fwd_rules(internet, sntp_blocked, wlan, uplink, ap_subnet)]
+    out += [f":{CHAIN_IN} - [0:0]"]
+    out += [" ".join(["-A", CHAIN_IN] + r) for r in in_rules(ap_subnet)]
     out += ["COMMIT", "*nat", f":{CHAIN_NAT} - [0:0]"]
     out += [" ".join(["-A", CHAIN_NAT] + r) for r in nat_rules(internet, uplink, ap_subnet)]
     out.append("COMMIT")
@@ -168,7 +181,7 @@ class Egress:
         os.replace(tmp, path)
 
     def _ensure_hooks(self):
-        for binary, table, chain, args in hook_rules(self.wlan):
+        for binary, table, chain, args in hook_rules(self.wlan, self.uplink):
             if self._run([binary, "-w", "-t", table, "-C", chain] + args)[0] != 0:
                 rc, _, err = self._run([binary, "-w", "-t", table, "-I", chain, "1"] + args)
                 if rc != 0:
@@ -253,12 +266,15 @@ class Egress:
             want = expected_listing(self.internet, self.sntp_blocked, self.wlan,
                                     self.uplink, self.ap_subnet)
             hooks_ok = all(self._run([b, "-w", "-t", t, "-C", c] + a)[0] == 0
-                           for b, t, c, a in hook_rules(self.wlan))
+                           for b, t, c, a in hook_rules(self.wlan, self.uplink))
+            rc_in, out_in, _ = self._run(["iptables", "-w", "-S", CHAIN_IN])
+            in_ok = rc_in == 0 and [ln.strip() for ln in out_in.splitlines() if ln.strip()] == \
+                [f"-N {CHAIN_IN}"] + [" ".join(["-A", CHAIN_IN] + r) for r in in_rules(self.ap_subnet)]
             return {
                 "internet": self.internet,
                 "sntp_blocked": self.sntp_blocked,
                 "lan_blocked": True,
-                "rules_ok": listed == want and hooks_ok,
+                "rules_ok": listed == want and hooks_ok and in_ok,
                 "rules": listed,
             }
 

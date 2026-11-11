@@ -18,6 +18,7 @@ from queue import Empty, Queue
 
 import ap_egress
 import dns_override
+import run_dir
 import sniffer
 
 logger = logging.getLogger(__name__)
@@ -71,8 +72,12 @@ EGRESS = ap_egress.Egress(WLAN_IF, UPLINK_IF, AP_SUBNET, DNS_SERVERS_FILE)
 
 # DNS override (bench-dns-override, CR-TB-05). Off by default, like egress: the
 # portal resets it at start-up and every ap_stop switches it off again.
-DNS_OVERRIDE_FILE = os.path.join(WORK_DIR, "dns-override-hosts")
+DNS_OVERRIDE_FILE = os.path.join(run_dir.RUN_DIR, "dns-override-hosts")   # S6-03
 DNS_OVERRIDE = dns_override.DnsOverride(AP_IP, DNS_OVERRIDE_FILE)
+
+# S6-05: called on EVERY AP stop (ap_stop, bench reset, shutdown all go through
+# _ap_stop_unlocked); the portal registers the capture stop here.
+AP_STOP_HOOKS = []
 
 VERSION = "1.0.0-pi"
 
@@ -353,11 +358,11 @@ def ap_start(ssid, password="", channel=6, dns_logging=False, internet=False):
         # resolvers while egress is on, none while off. dns_logging keeps the
         # sniffer's own forwarding as before.
         dnsmasq_lines.append(f"servers-file={DNS_SERVERS_FILE}")
-        # bench-dns-override: a hosts file that is empty unless the override is on
+        # bench-dns-override: a hosts file that is empty unless the override is on.
+        # S6-06: every ap_start begins with the override off and the file empty, so
+        # a stale "on" from a racing call can never survive into a new AP.
+        DNS_OVERRIDE.reset()
         dnsmasq_lines.append(f"addn-hosts={DNS_OVERRIDE_FILE}")
-        if not os.path.exists(DNS_OVERRIDE_FILE):
-            with open(DNS_OVERRIDE_FILE, "w"):
-                pass
         if dns_logging:
             dnsmasq_lines += ["server=8.8.8.8", "server=8.8.4.4"]
         if dns_logging:
@@ -488,6 +493,11 @@ def _ap_stop_unlocked():
         DNS_OVERRIDE.reset()
     except Exception as e:
         logger.error("DNS override reset failed: %s", e)
+    for hook in list(AP_STOP_HOOKS):
+        try:
+            hook()
+        except Exception as e:
+            logger.error("AP stop hook failed: %s", e)
     logger.info("AP stopped")
 
 
@@ -542,12 +552,14 @@ def dns_override_reset():
 def dns_override_set(enabled: bool, host=None) -> dict:
     """Switch the override; switching it on needs the AP up (the HTTPS server
     binds to the AP address, which only exists while the AP runs)."""
+    # S6-06: _lock held for the whole switch, so an ap_stop cannot slip in between
+    # the check and the set (same lock order as ap_stop: _lock, then the override's).
     with _lock:
         if enabled and not _ap_active:
             raise RuntimeError("the bench AP is not running: start it first")
-    _ensure_work_dir()
-    DNS_OVERRIDE.set(enabled, host)
-    return DNS_OVERRIDE.status()
+        _ensure_work_dir()
+        DNS_OVERRIDE.set(enabled, host)
+        return DNS_OVERRIDE.status()
 
 
 def dns_override_status() -> dict:

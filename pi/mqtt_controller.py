@@ -7,10 +7,12 @@ on the testbench WiFi AP.
 
 import logging
 import os
-import pwd
+import hashlib
 import re
 import subprocess
 import threading
+
+import run_dir
 import time
 
 logger = logging.getLogger(__name__)
@@ -21,11 +23,12 @@ logger = logging.getLogger(__name__)
 
 MQTT_PORT = 1883
 WORK_DIR = "/tmp/mqtt-tester"
-MOSQUITTO_CONF = os.path.join(WORK_DIR, "mosquitto.conf")
+# S6-03 (fork villa-2): root-written files under the root-owned /run/harness/mqtt
+MOSQUITTO_CONF = os.path.join(run_dir.MQTT_DIR, "mosquitto.conf")
 MOSQUITTO_LOG = os.path.join(WORK_DIR, "mosquitto.log")
 # bench-mqtt-auth (fork, CR-TB-03): temporary password file, only while a
 # broker started with credentials runs; deleted on stop.
-MOSQUITTO_PASSWD = os.path.join(WORK_DIR, "passwd")
+MOSQUITTO_PASSWD = os.path.join(run_dir.MQTT_DIR, "passwd")
 _CRED_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 # ---------------------------------------------------------------------------
@@ -36,6 +39,15 @@ _lock = threading.Lock()
 _active = False
 _proc = None
 _auth = False
+_creds = None            # S6-07: digest of the credentials the running broker uses
+
+
+class ConflictError(RuntimeError):
+    """S6-07: the broker already runs with another auth mode or other credentials."""
+
+
+def creds_digest(user, pw):
+    return None if user is None else hashlib.sha256(f"{user}\0{pw}".encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +65,7 @@ def parse_auth(body):
     if user is None and pw is None:
         return None, None
     if not (isinstance(user, str) and isinstance(pw, str)
-            and _CRED_RE.match(user) and _CRED_RE.match(pw)):
+            and _CRED_RE.fullmatch(user) and _CRED_RE.fullmatch(pw)):
         raise ValueError("user and pass: both, 1-64 characters of [A-Za-z0-9._-]")
     return user, pw
 
@@ -133,23 +145,24 @@ def _port_owner() -> str:
 # ---------------------------------------------------------------------------
 
 def _write_passwd(user, pw):
-    """Plain `user:pass` in a 0600 file, then hashed in place by mosquitto_passwd
-    -U, so the password never appears on a command line."""
-    fd = os.open(MOSQUITTO_PASSWD, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(f"{user}:{pw}\n")
+    """Plain `user:pass` in a fresh 0640 file (root:mosquitto, O_NOFOLLOW, under
+    /run/harness/mqtt), then hashed in place by mosquitto_passwd -U, so the password
+    never appears on a command line."""
+    gid = run_dir.mosquitto_gid()
+    run_dir.write_file(MOSQUITTO_PASSWD, f"{user}:{pw}\n", 0o640, gid)
     r = subprocess.run(["mosquitto_passwd", "-U", MOSQUITTO_PASSWD],
                        capture_output=True, timeout=10, check=False)
     if r.returncode != 0:
         _remove_passwd()
         raise RuntimeError("mosquitto_passwd failed")
-    # mosquitto started as root may drop to its own user before reading the file
+    # mosquitto may read it without root: group mosquitto, no access for others
+    fd = os.open(MOSQUITTO_PASSWD, os.O_RDONLY | os.O_NOFOLLOW)
     try:
-        pw_ent = pwd.getpwnam("mosquitto")
-        os.chown(MOSQUITTO_PASSWD, pw_ent.pw_uid, pw_ent.pw_gid)
-    except (KeyError, PermissionError):
-        pass
-    os.chmod(MOSQUITTO_PASSWD, 0o600)
+        if gid is not None:
+            os.fchown(fd, 0, gid)
+        os.fchmod(fd, 0o640)
+    finally:
+        os.close(fd)
 
 
 def _remove_passwd():
@@ -162,15 +175,17 @@ def _remove_passwd():
 def start(user=None, password=None):
     """Start the mosquitto MQTT broker, open or (bench-mqtt-auth) with one
     user. Returns dict with port and auth."""
-    global _active, _proc, _auth
+    global _active, _proc, _auth, _creds
 
     with _lock:
         if _active and _proc is not None and _proc.poll() is None:
-            if bool(user) != _auth:
-                raise RuntimeError("the broker is already running with another auth mode; stop it first")
+            # S6-07: same mode and same credentials, or a conflict (never a silent ok)
+            if bool(user) != _auth or creds_digest(user, password) != _creds:
+                raise ConflictError("the broker already runs with another auth mode or other credentials; stop it first")
             return {"port": MQTT_PORT, "auth": _auth}
 
         _ensure_work_dir()
+        run_dir.ensure_run_dirs()
         _kill_existing()
 
         # If something still holds the port it is not ours, so refuse rather than
@@ -187,8 +202,9 @@ def start(user=None, password=None):
         _remove_passwd()
         if user:
             _write_passwd(user, password)
-        with open(MOSQUITTO_CONF, "w") as f:
-            f.write("\n".join(conf_lines(MQTT_PORT, MOSQUITTO_LOG, MOSQUITTO_PASSWD if user else None)) + "\n")
+        run_dir.write_file(MOSQUITTO_CONF,
+                           "\n".join(conf_lines(MQTT_PORT, MOSQUITTO_LOG, MOSQUITTO_PASSWD if user else None)) + "\n",
+                           0o640, run_dir.mosquitto_gid())
 
         # Start mosquitto
         _proc = subprocess.Popen(
@@ -206,6 +222,7 @@ def start(user=None, password=None):
 
         _active = True
         _auth = bool(user)
+        _creds = creds_digest(user, password)
         logger.info("MQTT broker started on port %d (auth=%s)", MQTT_PORT, _auth)
         return {"port": MQTT_PORT, "auth": _auth}
 
@@ -214,12 +231,13 @@ def stop():
     """Stop the mosquitto broker."""
     global _active, _proc
 
-    global _auth
+    global _auth, _creds
     with _lock:
         _kill_proc(_proc)
         _proc = None
         _active = False
         _auth = False
+        _creds = None
         _remove_passwd()
         logger.info("MQTT broker stopped")
 

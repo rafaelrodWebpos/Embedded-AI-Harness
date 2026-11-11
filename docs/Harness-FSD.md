@@ -3966,7 +3966,7 @@ errors add `"error": "..."`.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/devices` | List all slots with status, RFC2217 URL, detected chip, debug port, USB device info |
-| GET | `/api/info` | Pi IP, hostname, total slot count, portal uptime; in the fork also `build` (installed git sha) and `capabilities` (`bench-ap-internet`, `bench-sntp-block` once the egress chains are installed; villa-2 adds `bench-dns-override` once its reset at start-up succeeded, `bench-mqtt-auth` if `mosquitto_passwd` exists, `bench-traffic-capture` if `tcpdump` exists, and `bench-serial-write`) |
+| GET | `/api/info` | Pi IP, hostname, total slot count, portal uptime; in the fork also `build` (installed git sha) and `capabilities` (`bench-ap-internet`, `bench-sntp-block` once the egress chains are installed; villa-2 (H-87) answers this route without the `X-Harness-Token` header with `ok`, `build` and `capabilities` only, and requires the token on every other `/api/*` route; it adds `bench-dns-override` once its reset at start-up succeeded, `bench-mqtt-auth` if `mosquitto_passwd` exists, `bench-traffic-capture` if `tcpdump` exists, and `bench-serial-write`) |
 
 `state` is one of `absent`, `idle`, `monitoring`, `resetting`, `debugging`, `recovering`, `download_mode`.
 

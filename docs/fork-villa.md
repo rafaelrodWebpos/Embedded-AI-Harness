@@ -54,6 +54,39 @@ ip_forward restored, closed state on failure).
 * The egress chains of villa-1 are not touched: the LAN stays blocked.
 * New package on the Pi: `tcpdump` (owner's decision D6, H-86).
 
+### villa-2 after the S6 review (H-87)
+
+* **API token (S6-01).** Every `/api/*` request needs the header
+  `X-Harness-Token: <token>`, except `GET /api/info`, which without the token
+  only returns `ok`, `build` and `capabilities` (no address, name or slots).
+  The token is generated on the Pi by `install.sh` in
+  `/etc/rfc2217/api-token` (root, 0600, kept across updates) and never leaves
+  the Pi except into the laptop's `.env` as `TESTBENCH_TOKEN`; it is never in
+  git, in a log or in a response. The portal fails closed: with no valid token
+  file every protected route answers 401. `testbench_driver` sends it from
+  `TESTBENCH_TOKEN` (or its `token=` argument); the web UI asks for it once and
+  keeps it in the browser; the udev and dnsmasq helper scripts read it from the
+  file and pass it on stdin, never on a command line. CORS
+  (`Access-Control-Allow-Origin: *`) is gone.
+* **INPUT guard (S6-04).** Chain `HARNESS_AP_IN`, hooked at position 1 of
+  `INPUT` for `-i eth0`, drops anything from the uplink addressed to
+  192.168.4.0/24, always: a LAN machine routing the AP subnet through the Pi
+  reaches nothing there.
+* **Root files out of /tmp (S6-03).** The DNS-override hosts file, the test
+  broker's `mosquitto.conf` and its password file live under `/run/harness`
+  (root, 0711: traversable so dnsmasq and mosquitto, possibly without root, can
+  read their own file; not listable, not writable) and `/run/harness/mqtt`
+  (root:mosquitto, 0750); files are created `O_EXCL|O_NOFOLLOW` and renamed in
+  place; a directory that is a symlink, foreign-owned or writable by others is
+  refused.
+* **Capture (S6-05)** only while the bench AP is up, and every AP stop (API,
+  bench reset, shutdown) stops it.
+* **S6-06** the DNS override switch holds the Wi-Fi lock and every `ap_start`
+  begins with it off; **S6-07** starting the broker with other credentials (or
+  another auth mode) while it runs answers 409; **S6-08** all input regexes use
+  full matches (no trailing newline); **S6-09** the HTTPS test server does each
+  TLS handshake in its own thread with a 5 s timeout.
+
 ## Install on the Pi
 
 0. **Snapshot** (needed by the way back), as root on the Pi:
@@ -89,10 +122,15 @@ the way back still returns to the original bench.
 1. `sudo apt-get install -y tcpdump`
 2. In the clone: `git fetch && git checkout villa-2`, then
    `sudo bash pi/install.sh --update`
-3. Check: `GET /api/info` lists `bench-ap-internet`, `bench-sntp-block`,
+3. **Token (S6-01):** `sudo cat /etc/rfc2217/api-token` and put the value in the
+   laptop's `.env` as `TESTBENCH_TOKEN=<value>` (the `.env` is never committed).
+   Do not paste it anywhere else. Open the bench web UI once and enter it when
+   asked.
+4. Check: `GET /api/info` (no token) lists `bench-ap-internet`, `bench-sntp-block`,
    `bench-dns-override`, `bench-mqtt-auth`, `bench-traffic-capture` and
    `bench-serial-write`; `GET /api/wifi/dns_override` says `enabled: false`;
-   `GET /api/wifi/internet` says `internet: false`, `rules_ok: true`.
+   `GET /api/wifi/internet` (with the token) says `internet: false`, `rules_ok: true`;
+   the same request without the token answers 401.
 
 ## Way back (one command)
 
@@ -102,8 +140,10 @@ sudo harness-volver-original
 
 Stops the portal, removes the `HARNESS_*` chains and their jumps, restores
 `net.ipv4.ip_forward` and the snapshot's files, deletes `ap_egress.py`,
-`dns_override.py`, `capture_controller.py`, the DNS-override certificate, the
-broker's temporary password file and the build marker, stops a running capture, restarts the portal and checks that no `HARNESS` rule is left and
+`dns_override.py`, `capture_controller.py`, `api_auth.py`, `run_dir.py`, the
+`HARNESS_AP_IN` chain and its `INPUT` jump, the API token, `/run/harness`, the
+DNS-override certificate, the broker's temporary password file and the build
+marker, stops a running capture, restarts the portal and checks that no `HARNESS` rule is left and
 `/api/info` no longer lists the capabilities. It lives in `/usr/local/sbin`, so it
 works even if the fork's clone is deleted.
 
