@@ -6,7 +6,11 @@
 # Restaura la instantánea tomada antes de la instalación (docs/fork-villa.md,
 # paso 0) en /var/backups/harness: los archivos que instala install.sh y el valor
 # de net.ipv4.ip_forward. Quita además todo lo que el fork añade y el original no
-# conoce: las cadenas HARNESS_* con sus saltos, ap_egress.py y la marca de build.
+# conoce: las cadenas HARNESS_* con sus saltos, ap_egress.py, dns_override.py,
+# capture_controller.py, el certificado del DNS override, el fichero de
+# contraseñas temporal del broker y la marca de build. tcpdump (villa-2) no se
+# desinstala: es un paquete de Debian; quitarlo a mano si se quiere
+# (apt-get remove tcpdump).
 # Termina comprobando que no queda ninguna regla HARNESS y que el portal responde.
 set -euo pipefail
 
@@ -18,6 +22,7 @@ WLAN_IF="${WIFI_WLAN_IF:-wlan0}"
 
 echo "1/5 parar el portal"
 systemctl stop rfc2217-portal || true
+pkill -f "tcpdump -i $WLAN_IF" 2>/dev/null || true      # villa-2: una captura en curso
 
 echo "2/5 quitar las cadenas del fork"
 quitar_salto() {   # binario tabla cadena args...: borra todas las copias del salto
@@ -42,7 +47,9 @@ sysctl -w "net.ipv4.ip_forward=$(cat "$SNAP/ip_forward-antes")"
 
 echo "4/5 restaurar los archivos del banco original"
 tar xzf "$SNAP/archivos-antes.tgz" -C /
-rm -f /usr/local/bin/ap_egress.py /usr/local/share/harness/build
+rm -f /usr/local/bin/ap_egress.py /usr/local/bin/dns_override.py /usr/local/bin/capture_controller.py \
+      /usr/local/share/harness/build /tmp/mqtt-tester/passwd /tmp/wifi-tester/dns-override-hosts
+rm -rf /var/lib/rfc2217/dns-override-tls
 systemctl daemon-reload
 udevadm control --reload-rules || true
 systemctl restart rfc2217-portal
@@ -53,7 +60,7 @@ quedan=$( { iptables-save; ip6tables-save; } | grep -c HARNESS || true)
 info=$(curl -s -m 5 http://127.0.0.1:8080/api/info || true)
 echo "reglas HARNESS que quedan: $quedan"
 echo "/api/info: $info"
-if [ "$quedan" -ne 0 ] || [ -z "$info" ] || echo "$info" | grep -q 'bench-ap-internet'; then
+if [ "$quedan" -ne 0 ] || [ -z "$info" ] || echo "$info" | grep -qE 'bench-ap-internet|bench-dns-override|bench-traffic-capture|bench-mqtt-auth'; then
     echo "VUELTA ATRÁS INCOMPLETA: revisar a mano"; exit 1
 fi
 echo "Banco original restaurado. (Este comando se queda en /usr/local/sbin; se puede borrar.)"

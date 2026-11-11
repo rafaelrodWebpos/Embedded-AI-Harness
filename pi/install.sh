@@ -142,6 +142,8 @@ cp "$SCRIPT_DIR/netscan_controller.py"      /usr/local/bin/netscan_controller.py
 cp "$SCRIPT_DIR/tls_mirror_controller.py"   /usr/local/bin/tls_mirror_controller.py
 cp "$SCRIPT_DIR/sniffer.py"                 /usr/local/bin/sniffer.py
 cp "$SCRIPT_DIR/ap_egress.py"               /usr/local/bin/ap_egress.py
+cp "$SCRIPT_DIR/dns_override.py"            /usr/local/bin/dns_override.py
+cp "$SCRIPT_DIR/capture_controller.py"      /usr/local/bin/capture_controller.py
 cp "$SCRIPT_DIR/rfc2217-learn-slots"        /usr/local/bin/rfc2217-learn-slots
 
 chmod +x /usr/local/bin/rfc2217-portal

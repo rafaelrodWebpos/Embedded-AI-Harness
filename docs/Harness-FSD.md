@@ -3966,7 +3966,7 @@ errors add `"error": "..."`.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/devices` | List all slots with status, RFC2217 URL, detected chip, debug port, USB device info |
-| GET | `/api/info` | Pi IP, hostname, total slot count, portal uptime; in the fork also `build` (installed git sha) and `capabilities` (`bench-ap-internet`, `bench-sntp-block` once the egress chains are installed) |
+| GET | `/api/info` | Pi IP, hostname, total slot count, portal uptime; in the fork also `build` (installed git sha) and `capabilities` (`bench-ap-internet`, `bench-sntp-block` once the egress chains are installed; villa-2 adds `bench-dns-override` once its reset at start-up succeeded, `bench-mqtt-auth` if `mosquitto_passwd` exists, `bench-traffic-capture` if `tcpdump` exists, and `bench-serial-write`) |
 
 `state` is one of `absent`, `idle`, `monitoring`, `resetting`, `debugging`, `recovering`, `download_mode`.
 
@@ -4027,6 +4027,11 @@ AP and STA modes are mutually exclusive.
 | GET | `/api/wifi/internet` | AP egress state `{"internet", "sntp_blocked", "lan_blocked": true, "rules_ok", "rules": [...]}` — `rules` is the live `iptables -S HARNESS_AP_FWD`, `rules_ok` compares it with the expected set (fork rafaelrodWebpos) |
 | POST | `/api/wifi/internet` | `{"enabled": true\|false}` — internet egress for AP clients: public addresses only, LAN and every private range blocked; off at start-up and after every `ap_stop`. Same response as the GET |
 | POST | `/api/wifi/sntp_block` | `{"blocked": true\|false}` — drop UDP/123 from the AP network (an SNTP attempt then times out). Same response as the GET |
+| GET | `/api/wifi/dns_override` | Fork villa-2 (`bench-dns-override`): `{enabled, host, https}` |
+| POST | `/api/wifi/dns_override` | `{"enabled": true, "host": "github.com"}` — the AP's dnsmasq answers that one name with 192.168.4.1, where an HTTPS server with a self-signed certificate listens on 443 (bound to the AP address only; 404 to everything). Needs the AP up. `{"enabled": false}` switches it off; off at start-up and on every `ap_stop` |
+| POST | `/api/capture/start` | Fork villa-2 (`bench-traffic-capture`): `{"mac": "aa:bb:…", "seconds": 1-600}` — tcpdump on the AP interface only, frames from that MAC only, headers only, nothing written to disk. Returns at once |
+| GET | `/api/capture/result` | `{state: idle\|running\|done, mac, seconds, flows: [{proto, dst, dport, kind: unicast\|broadcast\|multicast, packets}]}` |
+| POST | `/api/capture/stop` | Stop a running capture (also done by every `ap_stop`) |
 | POST | `/api/wifi/sta_join` · `sta_leave` | Join / leave a network `{"ssid", "pass?"}` |
 | GET | `/api/wifi/scan` | Scan nearby WiFi networks |
 | POST | `/api/wifi/http` | HTTP relay through wlan0 `{"method", "url", "headers?", "body?"}` |
@@ -4116,7 +4121,7 @@ RFC2217 flashing (esptool from the host) needs no endpoint (§6.7).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/mqtt/start` · `/stop` | Start / stop the mosquitto test broker |
+| POST | `/api/mqtt/start` · `/stop` | Start / stop the mosquitto test broker. Fork villa-2 (`bench-mqtt-auth`): body `{"user": …, "pass": …}` ([A-Za-z0-9._-]{1,64}) starts it with `allow_anonymous false` and a temporary password file (0600, hashed in place, deleted on stop) |
 | GET | `/api/mqtt/status` | Running state + port |
 
 ### D.13 Test Progress & Human Interaction

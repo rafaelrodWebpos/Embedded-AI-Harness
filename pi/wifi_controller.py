@@ -17,6 +17,7 @@ import urllib.request
 from queue import Empty, Queue
 
 import ap_egress
+import dns_override
 import sniffer
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,11 @@ UPLINK_IF = os.environ.get("WIFI_UPLINK_IF", "eth0")
 # AP egress (bench-ap-internet, bench-sntp-block). Off by default: the portal
 # calls egress_reset() at start-up and every ap_stop switches it off again.
 EGRESS = ap_egress.Egress(WLAN_IF, UPLINK_IF, AP_SUBNET, DNS_SERVERS_FILE)
+
+# DNS override (bench-dns-override, CR-TB-05). Off by default, like egress: the
+# portal resets it at start-up and every ap_stop switches it off again.
+DNS_OVERRIDE_FILE = os.path.join(WORK_DIR, "dns-override-hosts")
+DNS_OVERRIDE = dns_override.DnsOverride(AP_IP, DNS_OVERRIDE_FILE)
 
 VERSION = "1.0.0-pi"
 
@@ -347,6 +353,11 @@ def ap_start(ssid, password="", channel=6, dns_logging=False, internet=False):
         # resolvers while egress is on, none while off. dns_logging keeps the
         # sniffer's own forwarding as before.
         dnsmasq_lines.append(f"servers-file={DNS_SERVERS_FILE}")
+        # bench-dns-override: a hosts file that is empty unless the override is on
+        dnsmasq_lines.append(f"addn-hosts={DNS_OVERRIDE_FILE}")
+        if not os.path.exists(DNS_OVERRIDE_FILE):
+            with open(DNS_OVERRIDE_FILE, "w"):
+                pass
         if dns_logging:
             dnsmasq_lines += ["server=8.8.8.8", "server=8.8.4.4"]
         if dns_logging:
@@ -428,6 +439,7 @@ def ap_start(ssid, password="", channel=6, dns_logging=False, internet=False):
             raise RuntimeError(f"dnsmasq failed to start: {_tail(DNSMASQ_LOG)}")
 
         EGRESS.attach_dnsmasq(_ap_dnsmasq_proc.pid)
+        DNS_OVERRIDE.attach_dnsmasq(_ap_dnsmasq_proc.pid)
         if internet:
             EGRESS.set_internet(True)
 
@@ -471,6 +483,11 @@ def _ap_stop_unlocked():
         EGRESS.reset()
     except Exception as e:      # reported by egress_status() as rules_ok=false
         logger.error("AP egress reset failed: %s", e)
+    DNS_OVERRIDE.attach_dnsmasq(None)
+    try:
+        DNS_OVERRIDE.reset()
+    except Exception as e:
+        logger.error("DNS override reset failed: %s", e)
     logger.info("AP stopped")
 
 
@@ -510,6 +527,31 @@ def egress_set_sntp_block(blocked: bool) -> dict:
 
 def egress_status() -> dict:
     return EGRESS.status()
+
+
+# ---------------------------------------------------------------------------
+# DNS override (bench-dns-override)
+# ---------------------------------------------------------------------------
+
+def dns_override_reset():
+    """Default state (off). Called at portal start-up."""
+    _ensure_work_dir()
+    DNS_OVERRIDE.reset()
+
+
+def dns_override_set(enabled: bool, host=None) -> dict:
+    """Switch the override; switching it on needs the AP up (the HTTPS server
+    binds to the AP address, which only exists while the AP runs)."""
+    with _lock:
+        if enabled and not _ap_active:
+            raise RuntimeError("the bench AP is not running: start it first")
+    _ensure_work_dir()
+    DNS_OVERRIDE.set(enabled, host)
+    return DNS_OVERRIDE.status()
+
+
+def dns_override_status() -> dict:
+    return DNS_OVERRIDE.status()
 
 
 # ---------------------------------------------------------------------------

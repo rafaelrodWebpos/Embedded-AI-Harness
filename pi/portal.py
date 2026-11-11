@@ -32,6 +32,8 @@ import mqtt_controller
 import netscan_controller
 import tls_mirror_controller
 import ap_egress
+import capture_controller
+import dns_override
 import wifi_controller
 try:
     import ble_controller
@@ -65,6 +67,25 @@ BUILD_FILE = "/usr/local/share/harness/build"
 # and bench-sntp-block are claimed only after the egress chains were installed
 # at start-up (egress_reset succeeded).
 _egress_ready = False
+# villa-2: bench-dns-override (needs the reset at start-up to succeed),
+# bench-mqtt-auth (needs mosquitto_passwd), bench-traffic-capture (needs
+# tcpdump), bench-serial-write (POST /api/serial/write, FR-030, already here).
+_dns_override_ready = False
+CAPTURE = capture_controller.Capture(os.environ.get("WIFI_WLAN_IF", "wlan0"))
+
+
+def _capabilities():
+    caps = []
+    if _egress_ready:
+        caps += ["bench-ap-internet", "bench-sntp-block"]
+    if _dns_override_ready:
+        caps.append("bench-dns-override")
+    if shutil.which("mosquitto_passwd"):
+        caps.append("bench-mqtt-auth")
+    if capture_controller.Capture.available():
+        caps.append("bench-traffic-capture")
+    caps.append("bench-serial-write")
+    return caps
 
 
 def _read_build():
@@ -2794,6 +2815,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": True, **mqtt_controller.status()})
         elif path == "/api/wifi/internet":
             self._handle_wifi_internet_get()
+        elif path == "/api/wifi/dns_override":
+            self._send_json({"ok": True, **wifi_controller.dns_override_status()})
+        elif path == "/api/capture/result":
+            self._send_json({"ok": True, **CAPTURE.result()})
         elif path == "/api/tls-mirror/status":
             self._send_json({"ok": True, **tls_mirror_controller.status()})
         elif path == "/api/udplog":
@@ -2864,6 +2889,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_wifi_internet_post()
         elif path == "/api/wifi/sntp_block":
             self._handle_wifi_sntp_block_post()
+        elif path == "/api/wifi/dns_override":
+            self._handle_wifi_dns_override_post()
+        elif path == "/api/capture/start":
+            self._handle_capture_start()
+        elif path == "/api/capture/stop":
+            CAPTURE.stop()
+            self._send_json({"ok": True, **CAPTURE.result()})
         elif path == "/api/wifi/sta_join":
             self._handle_wifi_sta_join()
         elif path == "/api/wifi/sta_leave":
@@ -2925,7 +2957,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_sdr_stop()
         elif path == "/api/mqtt/start":
             try:
-                self._send_json({"ok": True, **mqtt_controller.start()})
+                user, pw = mqtt_controller.parse_auth(self._read_json())   # bench-mqtt-auth
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
+                return
+            try:
+                self._send_json({"ok": True, **mqtt_controller.start(user, pw)})
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, 500)
         elif path == "/api/mqtt/stop":
@@ -2996,8 +3033,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "slots_configured": sum(1 for s in slots.values() if s["tcp_port"] is not None),
             "slots_running": sum(1 for s in slots.values() if s["running"]),
             "build": _read_build(),
-            "capabilities": (["bench-ap-internet", "bench-sntp-block"]
-                             if _egress_ready else []),
+            "capabilities": _capabilities(),
         })
 
     def _handle_hotplug(self):
@@ -3362,6 +3398,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _handle_wifi_ap_stop(self):
         try:
             wifi_controller.ap_stop()
+            CAPTURE.stop()              # bench-traffic-capture: nothing runs past ap_stop
             self._send_json({"ok": True})
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)})
@@ -3402,6 +3439,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": True, **result})
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_wifi_dns_override_post(self):
+        try:
+            enabled, host = dns_override.parse_request(self._read_json())
+        except ValueError as e:
+            self._send_json({"ok": False, "error": str(e)}, 400)
+            return
+        try:
+            result = wifi_controller.dns_override_set(enabled, host)
+            log_activity(f"AP DNS override {'on: ' + host if enabled else 'off'}", "wifi")
+            self._send_json({"ok": True, **result})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _handle_capture_start(self):
+        try:
+            mac, seconds = capture_controller.parse_request(self._read_json())
+        except ValueError as e:
+            self._send_json({"ok": False, "error": str(e)}, 400)
+            return
+        if not capture_controller.Capture.available():
+            self._send_json({"ok": False, "error": "tcpdump is not installed"}, 501)
+            return
+        try:
+            res = CAPTURE.start(mac, seconds)
+            log_activity(f"capture started: {seconds} s from {mac}", "wifi")
+            self._send_json({"ok": True, **res})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)}, 409)
 
     def _handle_wifi_sta_join(self):
         body = self._read_json()
@@ -6085,7 +6151,7 @@ async function sdrPoll() {
 # ---------------------------------------------------------------------------
 
 def main():
-    global slots, host_ip, hostname, _egress_ready
+    global slots, host_ip, hostname, _egress_ready, _dns_override_ready
 
     slots = load_config(CONFIG_FILE)
 
@@ -6130,6 +6196,12 @@ def main():
         _egress_ready = True
     except Exception as e:
         print(f"[portal] AP egress unavailable: {e}", flush=True)
+    # DNS override starts OFF too (bench-dns-override).
+    try:
+        wifi_controller.dns_override_reset()
+        _dns_override_ready = True
+    except Exception as e:
+        print(f"[portal] DNS override unavailable: {e}", flush=True)
 
     addr = ("", PORT)
     http.server.ThreadingHTTPServer.allow_reuse_address = True

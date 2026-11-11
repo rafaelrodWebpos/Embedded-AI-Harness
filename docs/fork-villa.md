@@ -1,14 +1,23 @@
 # Fork rafaelrodWebpos/Embedded-AI-Harness
 
-Fork of `SensorsIot/Embedded-AI-Harness` at `db6a093`. It adds two bench
-capabilities and changes nothing else:
+Fork of `SensorsIot/Embedded-AI-Harness` at `db6a093`. It adds bench
+capabilities and changes nothing else. villa-1 added the first two; villa-2
+(this change, not installed until the independent read-only review S6 passes)
+adds four more, listed in the second table.
 
 | Capability | API | What it does |
 |---|---|---|
 | `bench-ap-internet` | `GET`/`POST /api/wifi/internet` `{"enabled": bool}` | Internet egress for SoftAP clients through the uplink (`eth0`), **public addresses only** |
 | `bench-sntp-block` | `POST /api/wifi/sntp_block` `{"blocked": bool}` | Drops UDP/123 from the AP network (an SNTP attempt times out) |
 
-Both are reported by `GET /api/info` (`capabilities`, plus `build` = installed git
+| Capability (villa-2) | API | What it does |
+|---|---|---|
+| `bench-dns-override` (CR-TB-05) | `GET`/`POST /api/wifi/dns_override` `{"enabled": bool, "host": "github.com"}` | The AP's dnsmasq answers that one name with 192.168.4.1; an HTTPS server with a self-signed certificate (generated on the Pi, never in git) listens on 192.168.4.1:443 and answers 404 to everything |
+| `bench-mqtt-auth` (CR-TB-03) | `POST /api/mqtt/start` `{"user": …, "pass": …}` | Test broker with `allow_anonymous false` and a temporary password file (0600, hashed in place with `mosquitto_passwd -U`, deleted on stop) |
+| `bench-traffic-capture` (CR-TB-04) | `POST /api/capture/start` `{"mac": …, "seconds": 1-600}`, `GET /api/capture/result`, `POST /api/capture/stop` | `tcpdump` on the AP interface only, frames from that MAC only; returns a summary per destination (proto, address, port, unicast/broadcast/multicast, packets), never payloads; nothing written to disk |
+| `bench-serial-write` | `POST /api/serial/write` (FR-030, already in the original) | Only reported in `capabilities` now |
+
+All are reported by `GET /api/info` (`capabilities`, plus `build` = installed git
 sha) and by `GET /api/wifi/internet` (`internet`, `sntp_blocked`, `lan_blocked`,
 `rules_ok`, `rules`). `GET /api/wifi/ap_status` also carries `internet` and
 `sntp_blocked`.
@@ -31,6 +40,19 @@ sha) and by `GET /api/wifi/internet` (`internet`, `sntp_blocked`, `lan_blocked`,
 `pi/ap_egress.py` holds the rule sets as pure functions; `pytest/host/test_ap_egress.py`
 checks them (exact order, every private range dropped, SNTP block, idempotence,
 ip_forward restored, closed state on failure).
+
+### villa-2 safety
+
+* `bench-dns-override` and the capture are **off by default**: at portal start-up
+  and on every `ap_stop`. The DNS override only changes what the AP's own
+  dnsmasq answers (an `addn-hosts` file that is empty while off); the HTTPS
+  server binds to the AP address only, never `0.0.0.0`, and serves nothing.
+* The capture listens on `wlan0` only, never the uplink, and only to frames
+  whose source MAC is the DUT's.
+* The test broker's password file exists only while a broker started with
+  credentials runs; the password never appears on a command line.
+* The egress chains of villa-1 are not touched: the LAN stays blocked.
+* New package on the Pi: `tcpdump` (owner's decision D6, H-86).
 
 ## Install on the Pi
 
@@ -58,6 +80,20 @@ ip_forward restored, closed state on failure).
 3. Check over HTTP: `GET /api/info` lists the two capabilities and a `build`;
    `GET /api/wifi/internet` says `internet: false`, `rules_ok: true`.
 
+### Installing villa-2 over villa-1
+
+Only after the S6 review. The snapshot of step 0 must be the one taken before
+villa-1 (it already exists in `/var/backups/harness`; do not overwrite it), so
+the way back still returns to the original bench.
+
+1. `sudo apt-get install -y tcpdump`
+2. In the clone: `git fetch && git checkout villa-2`, then
+   `sudo bash pi/install.sh --update`
+3. Check: `GET /api/info` lists `bench-ap-internet`, `bench-sntp-block`,
+   `bench-dns-override`, `bench-mqtt-auth`, `bench-traffic-capture` and
+   `bench-serial-write`; `GET /api/wifi/dns_override` says `enabled: false`;
+   `GET /api/wifi/internet` says `internet: false`, `rules_ok: true`.
+
 ## Way back (one command)
 
 ```bash
@@ -65,8 +101,9 @@ sudo harness-volver-original
 ```
 
 Stops the portal, removes the `HARNESS_*` chains and their jumps, restores
-`net.ipv4.ip_forward` and the snapshot's files, deletes `ap_egress.py` and the
-build marker, restarts the portal and checks that no `HARNESS` rule is left and
+`net.ipv4.ip_forward` and the snapshot's files, deletes `ap_egress.py`,
+`dns_override.py`, `capture_controller.py`, the DNS-override certificate, the
+broker's temporary password file and the build marker, stops a running capture, restarts the portal and checks that no `HARNESS` rule is left and
 `/api/info` no longer lists the capabilities. It lives in `/usr/local/sbin`, so it
 works even if the fork's clone is deleted.
 

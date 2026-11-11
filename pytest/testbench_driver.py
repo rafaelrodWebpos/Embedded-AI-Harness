@@ -237,6 +237,39 @@ class TestbenchDriver:
         result = self._api_post("/api/wifi/sntp_block", {"blocked": bool(blocked)}, timeout=15)
         return {k: v for k, v in result.items() if k != "ok"}
 
+    def dns_override(self, enabled: bool, host: Optional[str] = None) -> dict:
+        """bench-dns-override (fork villa-2, CR-TB-05): the bench AP's DNS answers
+        `host` with 192.168.4.1, where an HTTPS server with a self-signed
+        certificate listens on 443 (404 to everything). Needs the AP up. Off by
+        default and again after every ap_stop."""
+        body = {"enabled": bool(enabled)}
+        if enabled:
+            body["host"] = host
+        result = self._api_post("/api/wifi/dns_override", body, timeout=90)
+        return {k: v for k, v in result.items() if k != "ok"}
+
+    def dns_override_status(self) -> dict:
+        """{enabled, host, https}."""
+        result = self._api_get("/api/wifi/dns_override", timeout=15)
+        return {k: v for k, v in result.items() if k != "ok"}
+
+    def capture_start(self, mac: str, seconds: int) -> dict:
+        """bench-traffic-capture (fork villa-2, CR-TB-04): capture for `seconds`
+        (1-600) the IPv4 frames the DUT with `mac` sends on the AP interface.
+        Returns at once; poll capture_result()."""
+        result = self._api_post("/api/capture/start", {"mac": mac, "seconds": int(seconds)}, timeout=15)
+        return {k: v for k, v in result.items() if k != "ok"}
+
+    def capture_result(self) -> dict:
+        """{state: idle|running|done, mac, seconds, flows: [{proto, dst, dport,
+        kind: unicast|broadcast|multicast, packets}]} — headers only, no payload."""
+        result = self._api_get("/api/capture/result", timeout=15)
+        return {k: v for k, v in result.items() if k != "ok"}
+
+    def capture_stop(self) -> dict:
+        result = self._api_post("/api/capture/stop", {}, timeout=15)
+        return {k: v for k, v in result.items() if k != "ok"}
+
     def internet_status(self) -> dict:
         """{internet, sntp_blocked, lan_blocked, rules_ok, rules}."""
         result = self._api_get("/api/wifi/internet", timeout=15)
@@ -255,9 +288,12 @@ class TestbenchDriver:
 
     # ── MQTT broker (FR-029) ──────────────────────────────────────────
 
-    def mqtt_start(self) -> dict:
-        """Start the testbench mosquitto test broker (open, all interfaces)."""
-        return self._api_post("/api/mqtt/start", {}, timeout=15)
+    def mqtt_start(self, user: Optional[str] = None, password: Optional[str] = None) -> dict:
+        """Start the testbench mosquitto test broker (all interfaces): open, or
+        (bench-mqtt-auth, fork villa-2) with one test user and password,
+        [A-Za-z0-9._-]{1,64} each. The password file is deleted on stop."""
+        body = {"user": user, "pass": password} if user is not None else {}
+        return self._api_post("/api/mqtt/start", body, timeout=15)
 
     def mqtt_stop(self) -> None:
         self._api_post("/api/mqtt/stop", {}, timeout=10)
