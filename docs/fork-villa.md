@@ -68,6 +68,13 @@ ip_forward restored, closed state on failure).
   keeps it in the browser; the udev and dnsmasq helper scripts read it from the
   file and pass it on stdin, never on a command line. CORS
   (`Access-Control-Allow-Origin: *`) is gone.
+* **Test broker on the uplink (S6-02).** mosquitto keeps listening on every
+  interface (192.168.4.1 only exists while the AP is up, and tests start the
+  broker first), but chain `HARNESS_MQTT_IN`, hooked in `INPUT` for
+  `-i eth0 -p tcp --dport 1883`, accepts only the laptop's address from
+  `/etc/rfc2217/mqtt-allow` (root, one IPv4, never in git) and drops the rest;
+  without the file it drops everything (fail closed). AP clients and `lo` are
+  not affected. `GET /api/wifi/internet` reports `mqtt_lan_allowed`.
 * **INPUT guard (S6-04).** Chain `HARNESS_AP_IN`, hooked at position 1 of
   `INPUT` for `-i eth0`, drops anything from the uplink addressed to
   192.168.4.0/24, always: a LAN machine routing the AP subnet through the Pi
@@ -113,24 +120,46 @@ ip_forward restored, closed state on failure).
 3. Check over HTTP: `GET /api/info` lists the two capabilities and a `build`;
    `GET /api/wifi/internet` says `internet: false`, `rules_ok: true`.
 
-### Installing villa-2 over villa-1
+### Installing villa-2 over villa-1 — exact steps (one at a time)
 
 Only after the S6 review. The snapshot of step 0 must be the one taken before
-villa-1 (it already exists in `/var/backups/harness`; do not overwrite it), so
-the way back still returns to the original bench.
+villa-1 (it already exists in `/var/backups/harness`; never overwrite it), so the
+way back still returns to the original bench. `<COMMIT>` is the villa-2 commit
+the owner approved; `<LAPTOP_IP>` is the LAN address of the laptop as the Pi sees
+it (in Windows: `ipconfig`, the IPv4 of the network adapter; WSL runs in mirrored
+mode). Neither the token nor the laptop address is ever written in git.
 
-1. `sudo apt-get install -y tcpdump`
-2. In the clone: `git fetch && git checkout villa-2`, then
-   `sudo bash pi/install.sh --update`
-3. **Token (S6-01):** `sudo cat /etc/rfc2217/api-token` and put the value in the
-   laptop's `.env` as `TESTBENCH_TOKEN=<value>` (the `.env` is never committed).
-   Do not paste it anywhere else. Open the bench web UI once and enter it when
+On the Pi (SSH), one step at a time; each must finish without error before the next:
+
+1. Snapshot still there: `sudo ls -l /var/backups/harness` — must list
+   `archivos-antes.tgz`, `ip_forward-antes`, `iptables-antes.rules`.
+2. `sudo apt-get install -y tcpdump`
+3. Laptop address for the test broker (S6-02), before installing so the portal
+   reads it at start-up:
+   `echo '<LAPTOP_IP>' | sudo tee /etc/rfc2217/mqtt-allow >/dev/null && sudo chmod 600 /etc/rfc2217/mqtt-allow`
+4. Fresh clone of the approved commit:
+   `rm -rf /tmp/villa-2 && git clone --branch villa-2 https://github.com/rafaelrodWebpos/Embedded-AI-Harness.git /tmp/villa-2 && git -C /tmp/villa-2 rev-parse --short HEAD`
+   — must print `<COMMIT>`; if not, stop.
+5. `sudo bash /tmp/villa-2/pi/install.sh --update`
+6. Token (S6-01): `sudo cat /etc/rfc2217/api-token` — copy the value into the
+   laptop's `.env` as `TESTBENCH_TOKEN=<value>` (the `.env` is never committed;
+   do not paste it anywhere else). Open the bench web UI once and enter it when
    asked.
-4. Check: `GET /api/info` (no token) lists `bench-ap-internet`, `bench-sntp-block`,
-   `bench-dns-override`, `bench-mqtt-auth`, `bench-traffic-capture` and
-   `bench-serial-write`; `GET /api/wifi/dns_override` says `enabled: false`;
-   `GET /api/wifi/internet` (with the token) says `internet: false`, `rules_ok: true`;
-   the same request without the token answers 401.
+7. Checks, from the laptop (Claude runs them with the token from `.env`):
+   * `GET /api/info` without the token: `build` = `<COMMIT>`; capabilities
+     `bench-ap-internet`, `bench-sntp-block`, `bench-dns-override`,
+     `bench-mqtt-auth`, `bench-traffic-capture`, `bench-serial-write`; no
+     `host_ip`.
+   * `GET /api/wifi/internet` without the token: 401; with it: `internet: false`,
+     `rules_ok: true`, `mqtt_lan_allowed: true`.
+   * `GET /api/wifi/dns_override`: `enabled: false`.
+   * The test broker reachable from the laptop (an MQTT subscription works).
+8. `rm -rf /tmp/villa-2` (the installed files live in /usr/local; the way back
+   does not need the clone).
+
+If the laptop's address changes later, repeat step 3 with the new one and
+`sudo systemctl restart rfc2217-portal`; until then the laptop cannot reach the
+broker (fail closed).
 
 ## Way back (one command)
 

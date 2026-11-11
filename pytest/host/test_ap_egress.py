@@ -100,9 +100,9 @@ def test_restore_script_flushes_only_its_own_chains():
     assert f"*nat\n:{eg.CHAIN_NAT} - [0:0]\n" in s
     assert s.count("COMMIT") == 2
     for line in s.splitlines():
-        assert line in ("*filter", "*nat", "COMMIT") or line.startswith(":HARNESS_AP_") \
+        assert line in ("*filter", "*nat", "COMMIT") or line.startswith((":HARNESS_AP_", ":HARNESS_MQTT_")) \
             or line.startswith(f"-A {eg.CHAIN_FWD} ") or line.startswith(f"-A {eg.CHAIN_NAT} ") \
-            or line.startswith(f"-A {eg.CHAIN_IN} ")
+            or line.startswith(f"-A {eg.CHAIN_IN} ") or line.startswith(f"-A {eg.CHAIN_MQTT} ")
     # S6-04: the INPUT chain drops the AP subnet from the uplink, internet on or off
     for internet in (False, True):
         assert f"-A {eg.CHAIN_IN} -d {SUB} -j DROP" in eg.restore_script(internet, False, WLAN, UP, SUB).splitlines()
@@ -232,6 +232,8 @@ def test_status_compares_the_listing_with_the_expected_rules():
 
     def run(cmd, stdin=None):
         if cmd[:3] == ["iptables", "-w", "-S"]:
+            if cmd[3] == eg.CHAIN_MQTT:
+                return 0, f"-N {eg.CHAIN_MQTT}\n-A {eg.CHAIN_MQTT} -j DROP", ""
             return 0, (good_in if cmd[3] == eg.CHAIN_IN else good), ""
         return orig(cmd, stdin)
     e._run = run
@@ -281,3 +283,41 @@ def test_s6_04_input_hook_on_the_uplink_at_position_1():
     ins = [c for c in h.cmds if "-I" in c and "INPUT" in c]
     assert ins and ins[0][ins[0].index("-I") + 2] == "1" and ins[0][-1] == eg.CHAIN_IN
     assert eg.in_rules(SUB) == [["-d", SUB, "-j", "DROP"]]
+
+
+# S6-02 (H-87): on the uplink only the laptop reaches the test broker
+@pytest.mark.parametrize("text,ip", [
+    ("10.0.0.7\n", "10.0.0.7"), ("# laptop\n10.0.0.7\n", "10.0.0.7"), ("", None), ("10.0.0.7\n10.0.0.8", None),
+    ("0.0.0.0", None), ("10.0.0.255", None), ("224.0.0.1", None), ("127.0.0.1", None), ("10.0.0.0/24", None),
+    ("laptop", None), ("10.0.0.7 # x", None),
+])
+def test_s6_02_allow_file_is_one_unicast_host(text, ip):
+    assert eg.parse_mqtt_allow(text) == ip
+
+
+def test_s6_02_mqtt_chain_accepts_only_the_laptop_then_drops():
+    assert eg.mqtt_rules("10.0.0.7") == [["-s", "10.0.0.7", "-j", "ACCEPT"], ["-j", "DROP"]]
+    assert eg.mqtt_rules(None) == [["-j", "DROP"]]          # fail closed
+    hook = ("iptables", "filter", "INPUT", ["-i", UP, "-p", "tcp", "--dport", "1883", "-j", eg.CHAIN_MQTT])
+    assert hook in eg.hook_rules(WLAN, UP)
+    sc = eg.restore_script(False, False, WLAN, UP, SUB, "10.0.0.7").splitlines()
+    assert sc.index(f"-A {eg.CHAIN_MQTT} -s 10.0.0.7 -j ACCEPT") < sc.index(f"-A {eg.CHAIN_MQTT} -j DROP")
+
+
+def test_s6_02_egress_reads_the_allow_file_at_every_apply():
+    h = FakeHost()
+    files = {"/etc/allow": "10.0.0.7\n"}
+
+    def read(path):
+        if path == "/etc/allow":
+            if path not in files:
+                raise FileNotFoundError(path)
+            return files[path]
+        return h.read(path)
+    e = eg.Egress(WLAN, UP, SUB, "/w/dns-servers", run=h.run, read_file=read, write_file=h.write,
+                  mqtt_allow_file="/etc/allow")
+    e.reset()
+    assert f"-A {eg.CHAIN_MQTT} -s 10.0.0.7 -j ACCEPT" in h.stdin[-2][1]
+    del files["/etc/allow"]                     # file gone: read fails -> drop all
+    e.reset()
+    assert f"-A {eg.CHAIN_MQTT} -s" not in h.stdin[-2][1] and f"-A {eg.CHAIN_MQTT} -j DROP" in h.stdin[-2][1]

@@ -47,6 +47,13 @@ CHAIN_FWD6 = "HARNESS_AP_FWD6"
 # Pi. This INPUT chain, hooked for -i <uplink>, drops anything from the uplink
 # addressed to the AP subnet, always (internet on or off).
 CHAIN_IN = "HARNESS_AP_IN"
+# S6-02 (H-87): the test broker listens on every interface (192.168.4.1 only exists
+# while the AP is up, and tests start the broker first), so on the uplink only the
+# laptop's address may reach TCP/1883; anything else is dropped. The laptop's
+# address lives in a root file on the Pi (never in git); without it, fail closed.
+CHAIN_MQTT = "HARNESS_MQTT_IN"
+MQTT_PORT = "1883"
+MQTT_ALLOW_FILE = "/etc/rfc2217/mqtt-allow"
 
 # Destinations an AP client may never reach through the uplink (RFC 1918,
 # RFC 6598, RFC 3927, loopback, "this network", multicast and reserved).
@@ -100,10 +107,31 @@ def in_rules(ap_subnet: str) -> list:
     return [["-d", ap_subnet, "-j", "DROP"]]
 
 
+def parse_mqtt_allow(text):
+    """The laptop's IPv4 from the allow file: one unicast host address, or None."""
+    import ipaddress
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    if len(lines) != 1:
+        return None
+    try:
+        ip = ipaddress.IPv4Address(lines[0])
+    except ValueError:
+        return None
+    if ip.is_unspecified or ip.is_multicast or ip.is_loopback or ip.is_reserved or str(ip).endswith(".255"):
+        return None
+    return str(ip)
+
+
+def mqtt_rules(allow_ip) -> list:
+    """Rules of HARNESS_MQTT_IN (entered for -i <uplink> -p tcp --dport 1883)."""
+    return ([["-s", allow_ip, "-j", "ACCEPT"]] if allow_ip else []) + [["-j", "DROP"]]
+
+
 def hook_rules(wlan: str, uplink: str = "eth0") -> list:
     """Jumps into the dedicated chains: (binary, table, chain, args)."""
     return [
         ("iptables", "filter", "INPUT", ["-i", uplink, "-j", CHAIN_IN]),
+        ("iptables", "filter", "INPUT", ["-i", uplink, "-p", "tcp", "--dport", MQTT_PORT, "-j", CHAIN_MQTT]),
         ("iptables", "filter", "FORWARD", ["-i", wlan, "-j", CHAIN_FWD]),
         ("iptables", "filter", "FORWARD", ["-o", wlan, "-j", CHAIN_FWD]),
         ("iptables", "nat", "POSTROUTING", ["-j", CHAIN_NAT]),
@@ -113,7 +141,7 @@ def hook_rules(wlan: str, uplink: str = "eth0") -> list:
 
 
 def restore_script(internet: bool, sntp_blocked: bool, wlan: str, uplink: str,
-                   ap_subnet: str) -> str:
+                   ap_subnet: str, mqtt_allow=None) -> str:
     """Input for `iptables-restore --noflush`: declaring a chain flushes only that
     chain, and the whole table is committed at once."""
     out = ["*filter", f":{CHAIN_FWD} - [0:0]"]
@@ -121,6 +149,8 @@ def restore_script(internet: bool, sntp_blocked: bool, wlan: str, uplink: str,
             for r in fwd_rules(internet, sntp_blocked, wlan, uplink, ap_subnet)]
     out += [f":{CHAIN_IN} - [0:0]"]
     out += [" ".join(["-A", CHAIN_IN] + r) for r in in_rules(ap_subnet)]
+    out += [f":{CHAIN_MQTT} - [0:0]"]
+    out += [" ".join(["-A", CHAIN_MQTT] + r) for r in mqtt_rules(mqtt_allow)]
     out += ["COMMIT", "*nat", f":{CHAIN_NAT} - [0:0]"]
     out += [" ".join(["-A", CHAIN_NAT] + r) for r in nat_rules(internet, uplink, ap_subnet)]
     out.append("COMMIT")
@@ -148,8 +178,9 @@ class Egress:
     """State and side effects. `run` and `fs` are injectable for the host tier."""
 
     def __init__(self, wlan: str, uplink: str, ap_subnet: str, servers_file: str,
-                 run=None, read_file=None, write_file=None):
+                 run=None, read_file=None, write_file=None, mqtt_allow_file=None):
         self.wlan, self.uplink, self.ap_subnet = wlan, uplink, ap_subnet
+        self.mqtt_allow_file = mqtt_allow_file
         self.servers_file = servers_file
         self.internet = False
         self.sntp_blocked = False
@@ -187,10 +218,19 @@ class Egress:
                 if rc != 0:
                     raise RuntimeError(f"{binary} -I {chain}: {err.strip()}")
 
+    def _mqtt_allow(self):
+        """The laptop's address (S6-02), re-read at every apply; None = drop all 1883 on the uplink."""
+        if not self.mqtt_allow_file:
+            return None
+        try:
+            return parse_mqtt_allow(self._read(self.mqtt_allow_file))
+        except OSError:
+            return None
+
     def _apply_rules(self):
         rc, _, err = self._run(["iptables-restore", "-w", "--noflush"],
                                stdin=restore_script(self.internet, self.sntp_blocked, self.wlan,
-                                                    self.uplink, self.ap_subnet))
+                                                    self.uplink, self.ap_subnet, self._mqtt_allow()))
         if rc != 0:
             raise RuntimeError(f"iptables-restore: {err.strip()}")
         rc, _, err = self._run(["ip6tables-restore", "-w", "--noflush"], stdin=restore6_script())
@@ -270,11 +310,16 @@ class Egress:
             rc_in, out_in, _ = self._run(["iptables", "-w", "-S", CHAIN_IN])
             in_ok = rc_in == 0 and [ln.strip() for ln in out_in.splitlines() if ln.strip()] == \
                 [f"-N {CHAIN_IN}"] + [" ".join(["-A", CHAIN_IN] + r) for r in in_rules(self.ap_subnet)]
+            allow = self._mqtt_allow()
+            rc_m, out_m, _ = self._run(["iptables", "-w", "-S", CHAIN_MQTT])
+            mqtt_ok = rc_m == 0 and [ln.strip() for ln in out_m.splitlines() if ln.strip()] == \
+                [f"-N {CHAIN_MQTT}"] + [" ".join(["-A", CHAIN_MQTT] + r) for r in mqtt_rules(allow)]
             return {
                 "internet": self.internet,
                 "sntp_blocked": self.sntp_blocked,
                 "lan_blocked": True,
-                "rules_ok": listed == want and hooks_ok and in_ok,
+                "mqtt_lan_allowed": bool(allow),     # S6-02: the laptop's address is configured
+                "rules_ok": listed == want and hooks_ok and in_ok and mqtt_ok,
                 "rules": listed,
             }
 

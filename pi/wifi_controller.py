@@ -68,7 +68,8 @@ UPLINK_IF = os.environ.get("WIFI_UPLINK_IF", "eth0")
 
 # AP egress (bench-ap-internet, bench-sntp-block). Off by default: the portal
 # calls egress_reset() at start-up and every ap_stop switches it off again.
-EGRESS = ap_egress.Egress(WLAN_IF, UPLINK_IF, AP_SUBNET, DNS_SERVERS_FILE)
+EGRESS = ap_egress.Egress(WLAN_IF, UPLINK_IF, AP_SUBNET, DNS_SERVERS_FILE,
+                          mqtt_allow_file=ap_egress.MQTT_ALLOW_FILE)   # S6-02
 
 # DNS override (bench-dns-override, CR-TB-05). Off by default, like egress: the
 # portal resets it at start-up and every ap_stop switches it off again.

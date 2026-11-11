@@ -450,7 +450,7 @@ def test_s6_09_handshake_happens_per_connection_with_a_timeout():
 def test_h87_way_back_undoes_every_s6_change():
     import pathlib
     src = (pathlib.Path(api_auth.__file__).parent / "scripts" / "harness-volver-original.sh").read_text()
-    for needle in ("HARNESS_AP_IN", "/etc/rfc2217/api-token", "/run/harness", "/usr/local/bin/api_auth.py",
+    for needle in ("HARNESS_AP_IN", "HARNESS_MQTT_IN", "/etc/rfc2217/mqtt-allow", "/etc/rfc2217/api-token", "/run/harness", "/usr/local/bin/api_auth.py",
                    "/usr/local/bin/run_dir.py", "/usr/local/bin/dns_override.py", "/usr/local/bin/capture_controller.py"):
         assert needle in src, needle
     assert 'quitar_salto iptables  filter INPUT       -i "$UPLINK_IF" -j HARNESS_AP_IN' in src

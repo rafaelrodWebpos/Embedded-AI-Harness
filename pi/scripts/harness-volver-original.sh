@@ -33,12 +33,13 @@ quitar_salto() {   # binario tabla cadena args...: borra todas las copias del sa
     done
 }
 quitar_salto iptables  filter INPUT       -i "$UPLINK_IF" -j HARNESS_AP_IN   # villa-2, S6-04
+quitar_salto iptables  filter INPUT       -i "$UPLINK_IF" -p tcp --dport 1883 -j HARNESS_MQTT_IN   # S6-02
 quitar_salto iptables  filter FORWARD     -i "$WLAN_IF" -j HARNESS_AP_FWD
 quitar_salto iptables  filter FORWARD     -o "$WLAN_IF" -j HARNESS_AP_FWD
 quitar_salto iptables  nat    POSTROUTING -j HARNESS_AP_NAT
 quitar_salto ip6tables filter FORWARD     -i "$WLAN_IF" -j HARNESS_AP_FWD6
 quitar_salto ip6tables filter FORWARD     -o "$WLAN_IF" -j HARNESS_AP_FWD6
-for c in "iptables filter HARNESS_AP_FWD" "iptables filter HARNESS_AP_IN" "iptables nat HARNESS_AP_NAT" "ip6tables filter HARNESS_AP_FWD6"; do
+for c in "iptables filter HARNESS_AP_FWD" "iptables filter HARNESS_AP_IN" "iptables filter HARNESS_MQTT_IN" "iptables nat HARNESS_AP_NAT" "ip6tables filter HARNESS_AP_FWD6"; do
     set -- $c
     "$1" -w -t "$2" -F "$3" 2>/dev/null || true
     "$1" -w -t "$2" -X "$3" 2>/dev/null || true
@@ -52,7 +53,7 @@ tar xzf "$SNAP/archivos-antes.tgz" -C /
 rm -f /usr/local/bin/ap_egress.py /usr/local/bin/dns_override.py /usr/local/bin/capture_controller.py \
       /usr/local/bin/api_auth.py /usr/local/bin/run_dir.py \
       /usr/local/share/harness/build /tmp/mqtt-tester/passwd /tmp/wifi-tester/dns-override-hosts \
-      /etc/rfc2217/api-token
+      /etc/rfc2217/api-token /etc/rfc2217/mqtt-allow
 rm -rf /var/lib/rfc2217/dns-override-tls /run/harness
 systemctl daemon-reload
 udevadm control --reload-rules || true
@@ -66,6 +67,7 @@ echo "reglas HARNESS que quedan: $quedan"
 echo "/api/info: $info"
 restos=""
 [ -e /etc/rfc2217/api-token ] && restos="$restos /etc/rfc2217/api-token"
+[ -e /etc/rfc2217/mqtt-allow ] && restos="$restos /etc/rfc2217/mqtt-allow"
 [ -e /run/harness ] && restos="$restos /run/harness"
 echo "ficheros del fork que quedan:${restos:- ninguno}"
 if [ "$quedan" -ne 0 ] || [ -n "$restos" ] || [ -z "$info" ] || echo "$info" | grep -qE 'bench-ap-internet|bench-dns-override|bench-traffic-capture|bench-mqtt-auth'; then
