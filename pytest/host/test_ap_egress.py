@@ -296,12 +296,12 @@ def test_s6_02_allow_file_is_one_unicast_host(text, ip):
 
 
 def test_s6_02_mqtt_chain_accepts_only_the_laptop_then_drops():
-    assert eg.mqtt_rules("10.0.0.7") == [["-s", "10.0.0.7", "-j", "ACCEPT"], ["-j", "DROP"]]
+    assert eg.mqtt_rules("10.0.0.7") == [["-s", "10.0.0.7/32", "-j", "ACCEPT"], ["-j", "DROP"]]
     assert eg.mqtt_rules(None) == [["-j", "DROP"]]          # fail closed
     hook = ("iptables", "filter", "INPUT", ["-i", UP, "-p", "tcp", "--dport", "1883", "-j", eg.CHAIN_MQTT])
     assert hook in eg.hook_rules(WLAN, UP)
     sc = eg.restore_script(False, False, WLAN, UP, SUB, "10.0.0.7").splitlines()
-    assert sc.index(f"-A {eg.CHAIN_MQTT} -s 10.0.0.7 -j ACCEPT") < sc.index(f"-A {eg.CHAIN_MQTT} -j DROP")
+    assert sc.index(f"-A {eg.CHAIN_MQTT} -s 10.0.0.7/32 -j ACCEPT") < sc.index(f"-A {eg.CHAIN_MQTT} -j DROP")
 
 
 def test_s6_02_egress_reads_the_allow_file_at_every_apply():
@@ -317,7 +317,24 @@ def test_s6_02_egress_reads_the_allow_file_at_every_apply():
     e = eg.Egress(WLAN, UP, SUB, "/w/dns-servers", run=h.run, read_file=read, write_file=h.write,
                   mqtt_allow_file="/etc/allow")
     e.reset()
-    assert f"-A {eg.CHAIN_MQTT} -s 10.0.0.7 -j ACCEPT" in h.stdin[-2][1]
+    assert f"-A {eg.CHAIN_MQTT} -s 10.0.0.7/32 -j ACCEPT" in h.stdin[-2][1]
     del files["/etc/allow"]                     # file gone: read fails -> drop all
     e.reset()
     assert f"-A {eg.CHAIN_MQTT} -s" not in h.stdin[-2][1] and f"-A {eg.CHAIN_MQTT} -j DROP" in h.stdin[-2][1]
+
+
+def test_s6_02_rules_ok_with_the_listing_iptables_really_prints():
+    """Regression (villa-2 on the bench, 2026-11-13): iptables -S prints the source as
+    <ip>/32; rules_ok compared it with <ip> and was false although the rules were right."""
+    h = FakeHost()
+    e = eg.Egress(WLAN, UP, SUB, "/w/dns-servers", run=h.run, write_file=h.write,
+                  read_file=lambda p: "10.0.0.7\n" if p == "/etc/allow" else h.read(p),
+                  mqtt_allow_file="/etc/allow")
+    e.reset()
+    listing = {eg.CHAIN_FWD: f"-N {eg.CHAIN_FWD}\n-A {eg.CHAIN_FWD} -j DROP",
+               eg.CHAIN_IN: f"-N {eg.CHAIN_IN}\n-A {eg.CHAIN_IN} -d {SUB} -j DROP",
+               eg.CHAIN_MQTT: f"-N {eg.CHAIN_MQTT}\n-A {eg.CHAIN_MQTT} -s 10.0.0.7/32 -j ACCEPT\n-A {eg.CHAIN_MQTT} -j DROP"}
+    orig = h.run
+    e._run = lambda cmd, stdin=None: (0, listing[cmd[3]], "") if cmd[:3] == ["iptables", "-w", "-S"] else orig(cmd, stdin)
+    st = e.status()
+    assert st["rules_ok"] is True and st["mqtt_lan_allowed"] is True

@@ -124,7 +124,8 @@ def parse_mqtt_allow(text):
 
 def mqtt_rules(allow_ip) -> list:
     """Rules of HARNESS_MQTT_IN (entered for -i <uplink> -p tcp --dport 1883)."""
-    return ([["-s", allow_ip, "-j", "ACCEPT"]] if allow_ip else []) + [["-j", "DROP"]]
+    # /32 explícito: es como `iptables -S` lista la regla, y rules_ok compara ese texto
+    return ([["-s", f"{allow_ip}/32", "-j", "ACCEPT"]] if allow_ip else []) + [["-j", "DROP"]]
 
 
 def hook_rules(wlan: str, uplink: str = "eth0") -> list:
