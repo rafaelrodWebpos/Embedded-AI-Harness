@@ -51,7 +51,7 @@ sysctl -w "net.ipv4.ip_forward=$(cat "$SNAP/ip_forward-antes")"
 echo "4/5 restaurar los archivos del banco original"
 tar xzf "$SNAP/archivos-antes.tgz" -C /
 rm -f /usr/local/bin/ap_egress.py /usr/local/bin/dns_override.py /usr/local/bin/capture_controller.py \
-      /usr/local/bin/api_auth.py /usr/local/bin/run_dir.py \
+      /usr/local/bin/api_auth.py /usr/local/bin/run_dir.py /usr/local/bin/multipart_body.py \
       /usr/local/share/harness/build /tmp/mqtt-tester/passwd /tmp/wifi-tester/dns-override-hosts \
       /etc/rfc2217/api-token /etc/rfc2217/mqtt-allow
 rm -rf /var/lib/rfc2217/dns-override-tls /run/harness

@@ -54,6 +54,16 @@ ip_forward restored, closed state on failure).
 * The egress chains of villa-1 are not touched: the LAN stays blocked.
 * New package on the Pi: `tcpdump` (owner's decision D6, H-86).
 
+### villa-2: uploads kept byte-exact (2026-11-15)
+
+* The four multipart handlers (`_parse_multipart`, `/api/firmware/upload`,
+  `/api/flash`, `/api/ota`) split the body with `pi/multipart_body.py`, which
+  removes only the line break that belongs to each delimiter. Before, every
+  part went through `bytes.strip()` (inherited from upstream `1e3695f`), so a
+  binary ending in `\n`, `\r`, space, tab, `\x0b` or `\x0c` lost those bytes;
+  esptool padded with `0xFF` and the bootloader rejected the image ("Image hash
+  failed"). Host test: `pytest/host/test_multipart_body.py` (all 256 final bytes).
+
 ### villa-2 after the S6 review (H-87)
 
 * **API token (S6-01).** Every `/api/*` request needs the header

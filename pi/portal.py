@@ -35,6 +35,7 @@ import ap_egress
 import api_auth
 import capture_controller
 import dns_override
+import multipart_body
 import wifi_controller
 try:
     import ble_controller
@@ -3698,19 +3699,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None, None
         body = self.rfile.read(length)
         fields, files = {}, []
-        for part in body.split(b"--" + boundary.encode()):
-            part = part.strip()
-            if not part or part == b"--":
-                continue
-            if b"\r\n\r\n" in part:
-                header_section, content = part.split(b"\r\n\r\n", 1)
-            elif b"\n\n" in part:
-                header_section, content = part.split(b"\n\n", 1)
-            else:
-                continue
-            if content.endswith(b"\r\n"):
-                content = content[:-2]
-            headers_text = header_section.decode("utf-8", errors="replace")
+        # villa-2: multipart_body.parts keeps the content byte-exact (no strip())
+        for headers_text, content in multipart_body.parts(body, boundary):
             name = filename = None
             for token in headers_text.replace("\r", "").split("\n"):
                 if "content-disposition" in token.lower():
@@ -4227,24 +4217,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "empty body"}, 400)
             return
         body = self.rfile.read(length)
-        boundary_bytes = boundary.encode()
-        parts_raw = body.split(b"--" + boundary_bytes)
         project = None
         file_data = None
         file_name = None
-        for part in parts_raw:
-            part = part.strip()
-            if not part or part == b"--":
-                continue
-            if b"\r\n\r\n" in part:
-                header_section, content = part.split(b"\r\n\r\n", 1)
-            elif b"\n\n" in part:
-                header_section, content = part.split(b"\n\n", 1)
-            else:
-                continue
-            headers_text = header_section.decode("utf-8", errors="replace")
-            if content.endswith(b"\r\n"):
-                content = content[:-2]
+        # villa-2: multipart_body.parts keeps the content byte-exact (no strip())
+        for headers_text, content in multipart_body.parts(body, boundary):
             if 'name="project"' in headers_text:
                 project = content.decode("utf-8").strip()
             elif 'name="file"' in headers_text:
@@ -4305,27 +4282,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "empty body"}, 400)
             return
         body = self.rfile.read(length)
-        boundary_bytes = boundary.encode()
-        parts_raw = body.split(b"--" + boundary_bytes)
-
         fields: dict[str, str] = {}
         files: dict[str, bytes] = {}
         offset_files: list[tuple[str, str]] = []
         flash_args_text: str | None = None
 
-        for part in parts_raw:
-            part = part.strip()
-            if not part or part == b"--":
-                continue
-            if b"\r\n\r\n" in part:
-                header_section, content = part.split(b"\r\n\r\n", 1)
-            elif b"\n\n" in part:
-                header_section, content = part.split(b"\n\n", 1)
-            else:
-                continue
-            headers_text = header_section.decode("utf-8", errors="replace")
-            if content.endswith(b"\r\n"):
-                content = content[:-2]
+        # villa-2: multipart_body.parts keeps the content byte-exact (no strip())
+        for headers_text, content in multipart_body.parts(body, boundary):
             name = None
             filename = None
             for h in headers_text.split("\n"):
@@ -4578,23 +4541,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "empty body"}, 400)
             return
         body = self.rfile.read(length)
-        parts_raw = body.split(b"--" + boundary.encode())
-
         fields: dict[str, str] = {}
         firmware: bytes | None = None
-        for part in parts_raw:
-            part = part.strip()
-            if not part or part == b"--":
-                continue
-            if b"\r\n\r\n" in part:
-                header_section, content = part.split(b"\r\n\r\n", 1)
-            elif b"\n\n" in part:
-                header_section, content = part.split(b"\n\n", 1)
-            else:
-                continue
-            if content.endswith(b"\r\n"):
-                content = content[:-2]
-            headers_text = header_section.decode("utf-8", errors="replace")
+        # villa-2: multipart_body.parts keeps the content byte-exact (no strip())
+        for headers_text, content in multipart_body.parts(body, boundary):
             name = None
             is_file = False
             for h in headers_text.split("\n"):
