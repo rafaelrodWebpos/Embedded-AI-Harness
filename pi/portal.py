@@ -4344,12 +4344,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # Resolve offset/file pairs from flash_args (if any) and bin@... parts.
         flash_pairs: list[tuple[str, str]] = []
-        if flash_args_text:
-            # villa-2 (upstream #52): every --option on every line, not just the first
-            opts, pairs = flash_args.parse(flash_args_text)
-            flash_mode = opts.get("flash_mode", flash_mode)
-            flash_freq = opts.get("flash_freq", flash_freq)
-            flash_size = opts.get("flash_size", flash_size)
+        pairs: list = []
+        try:
+            if flash_args_text:
+                # villa-2 (upstream #52): every --option on every line, not just the first
+                opts, pairs = flash_args.parse(flash_args_text)          # A-3: strict lines
+                flash_mode = opts.get("flash_mode", flash_mode)
+                flash_freq = opts.get("flash_freq", flash_freq)
+                flash_size = opts.get("flash_size", flash_size)
+            # A-1: closed lists for the form fields and flash_args alike
+            flash_args.check_options(flash_mode, flash_freq, flash_size)
+            # A-2: every offset (flash_args lines and bin@ parts) is checked
+            for offset, _ in pairs + offset_files:
+                flash_args.check_offset(offset, flash_size)
+        except ValueError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, 400)
+            return
+        if pairs:
             for offset, path in pairs:
                 base = os.path.basename(path)
                 if base not in files:

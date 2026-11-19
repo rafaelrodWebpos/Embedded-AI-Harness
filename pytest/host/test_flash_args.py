@@ -36,9 +36,8 @@ def test_esp_idf_one_line_options_all_applied():
     "--flash_mode qio --flash_freq 40m --flash_size 16MB",
     "--flash-mode=qio --flash-freq=40m --flash-size=16MB",
     "--flash-size 16MB --flash-mode qio --flash-freq 40m",
-    "--unknown --flash-mode qio --other x --flash-freq 40m --flash-size 16MB",
 ])
-def test_forms_order_and_unknown_options(line):
+def test_forms_and_order(line):
     opts, pairs = flash_args.parse(line)
     assert opts == {"flash_mode": "qio", "flash_freq": "40m", "flash_size": "16MB"}
     assert pairs == []
@@ -49,10 +48,70 @@ def test_one_option_per_line_and_later_lines_override():
     assert opts == {"flash_mode": "dio", "flash_freq": "80m"}
 
 
-def test_option_without_value_and_non_numeric_offset_ignored():
-    opts, pairs = flash_args.parse("--flash-mode\nbootloader bootloader.bin\n0x10 a.bin\n")
-    assert opts == {}
-    assert pairs == [("0x10", "a.bin")]
+# A-3 (review 2026-11-18): a line with tokens left over is rejected, not skipped
+@pytest.mark.parametrize("text", [
+    "0x0 bootloader.bin extra",                      # image line with a third token
+    "0x0",                                           # image line without a file
+    "bootloader bootloader.bin",                     # not an offset → checked as offset later, but 2 tokens ok
+    "--flash-mode dio stray",                        # value-less stray token
+    "--unknown --flash-mode qio",                    # unknown option
+    "--other x --flash-freq 40m",                    # unknown option with a value
+    "--flash-mode",                                  # option without a value
+    "--flash-mode --flash-freq 80m",                 # option followed by another option
+    "--flash-mode=",                                 # empty value
+])
+def test_strict_lines(text):
+    if text == "bootloader bootloader.bin":
+        opts, pairs = flash_args.parse(text)         # A-3 is about token count; the offset is A-2's job
+        with pytest.raises(ValueError):
+            flash_args.check_offset(pairs[0][0], "8MB")
+        return
+    with pytest.raises(ValueError):
+        flash_args.parse(text)
+
+
+# A-1: closed lists, for flash_args and for the form fields (same function)
+@pytest.mark.parametrize("mode", ["qio", "qout", "dio", "dout", "keep"])
+def test_modes_accepted(mode):
+    flash_args.check_options(mode, "80m", "8MB")
+
+
+@pytest.mark.parametrize("mode,freq,size", [
+    ("DIO", "80m", "8MB"), ("dio;rm", "80m", "8MB"), ("", "80m", "8MB"), ("fastread", "80m", "8MB"),
+    ("dio", "80M", "8MB"), ("dio", "80", "8MB"), ("dio", "80m ", "8MB"), ("dio", "--erase-all", "8MB"),
+    ("dio", "80m", "8mb"), ("dio", "80m", "8MB;x"), ("dio", "80m", "auto"), ("dio", "80m", ""),
+    ("dio", "-1m", "8MB"),
+])
+def test_values_outside_the_lists_rejected(mode, freq, size):
+    with pytest.raises(ValueError):
+        flash_args.check_options(mode, freq, size)
+
+
+@pytest.mark.parametrize("freq,size", [("keep", "keep"), ("40m", "detect"), ("120m", "16MB"), ("20m", "2MB")])
+def test_other_valid_values(freq, size):
+    flash_args.check_options("dio", freq, size)
+
+
+# A-2: offsets
+@pytest.mark.parametrize("off", ["0x0", "0", "0x1000", "0x8000", "0xf000", "0x20000", "0x7ff000", "4096"])
+def test_offsets_accepted(off):
+    flash_args.check_offset(off, "8MB")
+
+
+@pytest.mark.parametrize("off,size", [
+    ("-0x1000", "8MB"), ("+0x1000", "8MB"), ("0x1_000", "8MB"), ("1_000", "8MB"), ("0x", "8MB"),
+    ("0x100", "8MB"), ("0x20001", "8MB"), ("100", "8MB"),            # not aligned
+    ("0x800000", "8MB"), ("0x1000000", "8MB"),                       # at/after the end of 8MB
+    ("0x8000000", "keep"), ("0o10000", "8MB"), ("0b1", "8MB"), (" 0x0", "8MB"), ("", "8MB"),
+])
+def test_offsets_rejected(off, size):
+    with pytest.raises(ValueError):
+        flash_args.check_offset(off, size)
+
+
+def test_offset_value():
+    assert flash_args.check_offset("0x20000", "8MB") == 0x20000
+    assert flash_args.check_offset("4096", "detect") == 4096
 
 
 def test_empty_and_none():
@@ -63,6 +122,8 @@ def test_empty_and_none():
 def test_handler_uses_the_parser():
     src = (ROOT / "pi" / "portal.py").read_text()
     assert "flash_args.parse(flash_args_text)" in src
+    assert "flash_args.check_options(flash_mode, flash_freq, flash_size)" in src
+    assert "flash_args.check_offset(offset, flash_size)" in src and "pairs + offset_files" in src
     assert 'tokens[0] in ("--flash_freq", "--flash-freq")' not in src, "the first-option-only loop is back"
     assert "flash_args.py" in (ROOT / "pi" / "install.sh").read_text()
 

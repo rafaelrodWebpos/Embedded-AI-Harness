@@ -72,6 +72,14 @@ ip_forward restored, closed state on failure).
   the size kept. `testbench_driver.flash(..., flash_args=...)` sends the option
   lines; without it the defaults (dio, 40m, keep) still apply. Host test:
   `pytest/host/test_flash_args.py`.
+* Review of 2026-11-18 (A-1..A-3): what reaches esptool is checked against
+  closed lists and answered with 400 otherwise — flash_mode in
+  {qio, qout, dio, dout, keep}, flash_freq `<n>m`/keep, flash_size
+  `<n>MB`/keep/detect (flash_args and form fields alike); every offset
+  (flash_args and `bin@`) hex or decimal without sign or `_`, aligned to
+  0x1000 (0x0 allowed) and below the flash size (128 MB bound when the size is
+  keep/detect); a flash_args line with tokens left over, an unknown option or
+  an option without a value is rejected.
 
 ### villa-2: uploads kept byte-exact (2026-11-15)
 
