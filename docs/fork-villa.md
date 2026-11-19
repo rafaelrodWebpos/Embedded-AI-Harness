@@ -54,6 +54,15 @@ ip_forward restored, closed state on failure).
 * The egress chains of villa-1 are not touched: the LAN stays blocked.
 * New package on the Pi: `tcpdump` (owner's decision D6, H-86).
 
+### villa-2: opening a native-USB port no longer resets the DUT (upstream #86, 2026-11-18)
+
+* `pi/plain_rfc2217_server.py` takes the #86 part of upstream PR #87 unchanged:
+  open with DTR held high and always drop RTS before DTR (also on client
+  disconnect), so the lines never pass through DTR=0/RTS=1, the
+  USB-Serial/JTAG chip-reset combination. Before, the proxy rebooted a running
+  ESP32 ~2 s after every hotplug add. The PR's #85 part (relay redirects) is not
+  taken. Host test: `pytest/host/test_rfc2217_open_no_reset.py`.
+
 ### villa-2: every flash_args option applied (upstream #52, 2026-11-18)
 
 * `/api/flash` reads a `flash_args` part with `pi/flash_args.py`, which applies
