@@ -54,6 +54,16 @@ ip_forward restored, closed state on failure).
 * The egress chains of villa-1 are not touched: the LAN stays blocked.
 * New package on the Pi: `tcpdump` (owner's decision D6, H-86).
 
+### villa-2: every flash_args option applied (upstream #52, 2026-11-18)
+
+* `/api/flash` reads a `flash_args` part with `pi/flash_args.py`, which applies
+  every `--flash-mode/--flash-freq/--flash-size` on every line (also the
+  `--flash_freq` and `--flash-freq=80m` forms). Before, only the first option of
+  a line was read, so ESP-IDF's one-line options flashed at the default 40m with
+  the size kept. `testbench_driver.flash(..., flash_args=...)` sends the option
+  lines; without it the defaults (dio, 40m, keep) still apply. Host test:
+  `pytest/host/test_flash_args.py`.
+
 ### villa-2: uploads kept byte-exact (2026-11-15)
 
 * The four multipart handlers (`_parse_multipart`, `/api/firmware/upload`,

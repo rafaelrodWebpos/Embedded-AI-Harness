@@ -147,6 +147,7 @@ cp "$SCRIPT_DIR/capture_controller.py"      /usr/local/bin/capture_controller.py
 cp "$SCRIPT_DIR/api_auth.py"                /usr/local/bin/api_auth.py
 cp "$SCRIPT_DIR/run_dir.py"                 /usr/local/bin/run_dir.py
 cp "$SCRIPT_DIR/multipart_body.py"          /usr/local/bin/multipart_body.py
+cp "$SCRIPT_DIR/flash_args.py"              /usr/local/bin/flash_args.py
 cp "$SCRIPT_DIR/rfc2217-learn-slots"        /usr/local/bin/rfc2217-learn-slots
 
 chmod +x /usr/local/bin/rfc2217-portal

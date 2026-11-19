@@ -35,6 +35,7 @@ import ap_egress
 import api_auth
 import capture_controller
 import dns_override
+import flash_args
 import multipart_body
 import wifi_controller
 try:
@@ -4344,33 +4345,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # Resolve offset/file pairs from flash_args (if any) and bin@... parts.
         flash_pairs: list[tuple[str, str]] = []
         if flash_args_text:
-            for line in flash_args_text.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                tokens = line.split()
-                if tokens[0].startswith("--"):
-                    if tokens[0] in ("--flash_mode", "--flash-mode") and len(tokens) > 1:
-                        flash_mode = tokens[1]
-                    elif tokens[0] in ("--flash_freq", "--flash-freq") and len(tokens) > 1:
-                        flash_freq = tokens[1]
-                    elif tokens[0] in ("--flash_size", "--flash-size") and len(tokens) > 1:
-                        flash_size = tokens[1]
-                    continue
-                if len(tokens) >= 2:
-                    try:
-                        int(tokens[0], 0)
-                    except ValueError:
-                        continue
-                    base = os.path.basename(tokens[1])
-                    if base not in files:
-                        self._send_json(
-                            {"ok": False,
-                             "error": f"flash_args references '{base}' but it was not uploaded"},
-                            400,
-                        )
-                        return
-                    flash_pairs.append((tokens[0], base))
+            # villa-2 (upstream #52): every --option on every line, not just the first
+            opts, pairs = flash_args.parse(flash_args_text)
+            flash_mode = opts.get("flash_mode", flash_mode)
+            flash_freq = opts.get("flash_freq", flash_freq)
+            flash_size = opts.get("flash_size", flash_size)
+            for offset, path in pairs:
+                base = os.path.basename(path)
+                if base not in files:
+                    self._send_json(
+                        {"ok": False,
+                         "error": f"flash_args references '{base}' but it was not uploaded"},
+                        400,
+                    )
+                    return
+                flash_pairs.append((offset, base))
         flash_pairs.extend(offset_files)
         if not flash_pairs:
             self._send_json({"ok": False, "error": "no binaries to flash"}, 400)

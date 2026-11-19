@@ -1032,11 +1032,18 @@ class TestbenchDriver:
         return any(pattern in ln for ln in lines), lines
 
     def flash(self, slot: str, images: dict, chip: str = "auto",
-              erase: bool = False, timeout: float = 300) -> dict:
+              erase: bool = False, timeout: float = 300,
+              flash_args: str | None = None) -> dict:
         """POST /api/flash — multipart flash through the portal.
 
         `images` maps a hex offset to a file path, e.g.
         {"0x0": ".../bootloader.bin", "0x10000": ".../app.bin"}.
+
+        `flash_args` (villa-2, upstream #52): esptool @flash_args text whose
+        option lines set the flash mode, frequency and size, e.g.
+        "--flash-mode dio --flash-freq 80m --flash-size 8MB". Without it the
+        portal flashes at its defaults (dio, 40m, keep). Pass only option
+        lines here; the images go in `images`.
 
         The portal stops the proxy, runs esptool locally against the devnode
         and restarts the proxy. Part names are `bin@<offset>`: the live
@@ -1062,6 +1069,13 @@ class TestbenchDriver:
                 f'name="bin@{offset}"; filename="{base}"\r\n'
                 f"Content-Type: application/octet-stream\r\n\r\n".encode()
                 + blob + b"\r\n"
+            )
+        if flash_args:
+            parts.append(
+                f"--{boundary}\r\nContent-Disposition: form-data; "
+                f'name="flash_args"; filename="flash_args"\r\n'
+                f"Content-Type: text/plain\r\n\r\n".encode()
+                + flash_args.encode() + b"\r\n"
             )
         parts.append(f"--{boundary}--\r\n".encode())
         body = b"".join(parts)
